@@ -10,9 +10,9 @@ use bytes::Bytes;
 use futures_core::stream::BoxStream;
 use futures_util::TryStreamExt;
 use object_store::{
-    CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    RenameOptions, Result, path::Path,
+    CopyMode, CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
+    PutResult, RenameOptions, Result, path::Path,
 };
 use rustix::fs::{AtFlags, Mode, OFlags};
 
@@ -304,11 +304,44 @@ impl ObjectStore for LinuxFS {
         crate::list::list_with_delimiter(Arc::clone(&self.state), prefix.cloned()).await
     }
 
-    async fn copy_opts(&self, _from: &Path, _to: &Path, _options: CopyOptions) -> Result<()> {
-        Err(Error::NotImplemented {
-            operation: "copy_opts".to_owned(),
-            implementer: STORE_NAME.to_owned(),
+    async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
+        let CopyOptions {
+            mode,
+            // ignore extensions
+            extensions: _,
+        } = options;
+        if mode != CopyMode::Overwrite {
+            return Err(Error::NotImplemented {
+                operation: format!("copy_opts(mode={mode:?})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+
+        let (from_dirs, from_file) = split_dirs_and_filename(from)?;
+        let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
+
+        let (to_dirs, to_file) = split_dirs_and_filename(to)?;
+        let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+
+        let from_file = from_file.to_owned();
+        let to_file = to_file.to_owned();
+        let from = from.clone();
+
+        spawn_io(move || {
+            let file_fd = rustix::fs::openat2(
+                &from_dir_fd,
+                from_file,
+                OFlags::RDONLY,
+                Mode::empty(),
+                rflags(),
+            )
+            .into_get_err(&from)?;
+
+            rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
+                .into_other_err()?;
+            Ok(())
         })
+        .await
     }
 
     async fn rename_opts(&self, _from: &Path, _to: &Path, _options: RenameOptions) -> Result<()> {
