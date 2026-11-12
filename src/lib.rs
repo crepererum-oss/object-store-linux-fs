@@ -345,6 +345,8 @@ impl ObjectStore for LinuxFS {
 
             rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
                 .into_other_err()?;
+            rustix::fs::fsync(&to_dir_fd).into_other_err()?;
+
             Ok(())
         })
         .await
