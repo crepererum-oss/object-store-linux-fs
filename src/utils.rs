@@ -1,10 +1,11 @@
 use std::{os::fd::OwnedFd, sync::Arc};
 
+use chrono::DateTime;
 use object_store::{
-    Error, Result,
+    Error, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path},
 };
-use rustix::fs::{Mode, OFlags, ResolveFlags};
+use rustix::fs::{Mode, OFlags, ResolveFlags, Stat};
 
 use crate::constants::STORE_NAME;
 
@@ -57,4 +58,18 @@ pub(crate) fn open_dir_fd(parent: &OwnedFd, child: &str) -> std::io::Result<Arc<
 
     let child_fd = rustix::fs::openat2(parent, child, dir_oflags(), Mode::empty(), rflags())?;
     Ok(Arc::new(child_fd))
+}
+
+pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
+    Ok(ObjectMeta {
+        location,
+        last_modified: DateTime::from_timestamp(stat.st_mtime as _, stat.st_mtime_nsec as _)
+            .ok_or_else(|| Error::Generic {
+                store: STORE_NAME,
+                source: "cannot read mtime".to_owned().into(),
+            })?,
+        size: stat.st_size as _,
+        e_tag: None,
+        version: None,
+    })
 }

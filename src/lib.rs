@@ -1,25 +1,24 @@
-use std::{ops::Range, os::fd::OwnedFd, path::PathBuf, sync::Arc};
+use std::{mem::MaybeUninit, ops::Range, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::DateTime;
 use futures_core::stream::BoxStream;
 use futures_util::TryStreamExt;
 use object_store::{
-    CopyOptions, Error, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
-    Result,
-    path::{DELIMITER_CHAR, Path},
+    CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    RenameOptions, Result, path::Path,
 };
-use rustix::fs::{AtFlags, FileType, OFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 
 use crate::{
-    constants::STORE_NAME,
+    constants::{READ_BUFFER_SIZE, STORE_NAME},
     state::State,
-    utils::{mode_create, open_dir_fd, rflags, spawn_io, split_dirs_and_filename},
+    utils::{mode_create, rflags, spawn_io, split_dirs_and_filename, stat_to_meta},
 };
 
 mod constants;
+mod list;
 mod state;
 mod utils;
 
@@ -113,11 +112,94 @@ impl ObjectStore for LinuxFS {
         todo!()
     }
 
-    async fn get_opts(&self, _location: &Path, _options: GetOptions) -> Result<GetResult> {
-        Err(Error::NotImplemented {
-            operation: "get_opts".to_owned(),
-            implementer: STORE_NAME.to_owned(),
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        let GetOptions {
+            if_match,
+            if_none_match,
+            if_modified_since,
+            if_unmodified_since,
+            range,
+            version,
+            head,
+            // ignore extensions
+            extensions: _,
+        } = options;
+        if let Some(if_match) = if_match {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(if_match={if_match})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+        if let Some(if_none_match) = if_none_match {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(if_none_match={if_none_match})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+        if let Some(if_modified_since) = if_modified_since {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(if_modified_since={if_modified_since})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+        if let Some(if_unmodified_since) = if_unmodified_since {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(if_unmodified_since={if_unmodified_since})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+        if let Some(range) = range {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(range={range})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+        if let Some(version) = version {
+            return Err(Error::NotImplemented {
+                operation: format!("get_opts(version={version})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+
+        let (dirs, file) = split_dirs_and_filename(location)?;
+        let dir_fd = self.state.open_dir(dirs, false).await?;
+        let file = file.to_owned();
+        let location = location.clone();
+
+        spawn_io(move || {
+            let file_fd =
+                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())?;
+            let stat = rustix::fs::fstat(&file_fd)?;
+            let meta = stat_to_meta(stat, location)?;
+
+            let range = 0..meta.size;
+
+            let stream = if head {
+                Box::pin(futures_util::stream::empty()) as BoxStream<'static, Result<Bytes>>
+            } else {
+                let buf = vec![MaybeUninit::<u8>::uninit(); READ_BUFFER_SIZE];
+                Box::pin(futures_util::stream::try_unfold(
+                    (file_fd, buf),
+                    async |(file_fd, mut buf)| {
+                        spawn_io(move || {
+                            let (init, _uninit) = rustix::io::read(&file_fd, &mut buf)?;
+                            let bytes = Bytes::from(init.to_owned());
+                            Ok(Some((bytes, (file_fd, buf))))
+                        })
+                        .await
+                    },
+                ))
+            };
+
+            Ok(GetResult {
+                payload: GetResultPayload::Stream(stream),
+                meta,
+                range,
+                attributes: Default::default(),
+                extensions: Default::default(),
+            })
         })
+        .await
     }
 
     async fn get_ranges(&self, _location: &Path, _ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
@@ -151,204 +233,7 @@ impl ObjectStore for LinuxFS {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
-        let prefix = prefix.cloned();
-        let state = Arc::clone(&self.state);
-
-        enum DirFd {
-            Eager {
-                prefix: Option<Path>,
-                dir_fd: Arc<OwnedFd>,
-            },
-            Lazy {
-                child_prefix: Path,
-                parent: Arc<OwnedFd>,
-                child: String,
-            },
-        }
-
-        enum NextTask {
-            OpenDir {
-                dir_fds: Vec<DirFd>,
-                state: Arc<State>,
-            },
-            ReadNextEntry {
-                dir_fds: Vec<DirFd>,
-                dir_fd: Arc<OwnedFd>,
-                // TODO: we may wanna use `RawDir` instead, because that way we could control buffer and syscall usage better
-                dir: rustix::fs::Dir,
-                prefix: Option<Path>,
-                state: Arc<State>,
-            },
-        }
-
-        Box::pin(
-            futures_util::stream::once(async move {
-                let dir_fd = match &prefix {
-                    Some(prefix) => {
-                        state
-                            .open_dir(prefix.as_ref().split(DELIMITER_CHAR), false)
-                            .await?
-                    }
-                    None => state.open_dir(std::iter::empty(), false).await?,
-                };
-
-                let stream = futures_util::stream::try_unfold(
-                    NextTask::OpenDir {
-                        dir_fds: vec![DirFd::Eager { prefix, dir_fd }],
-                        state,
-                    },
-                    async move |mut task| {
-                        loop {
-                            task = match task {
-                                NextTask::OpenDir { mut dir_fds, state } => {
-                                    let Some(dir_fd) = dir_fds.pop() else {
-                                        // we're done
-                                        return Ok(None);
-                                    };
-
-                                    let (prefix, dir, dir_fd) = spawn_io(move || {
-                                        let (prefix, dir_fd) = match dir_fd {
-                                            DirFd::Eager { prefix, dir_fd } => (prefix, dir_fd),
-                                            DirFd::Lazy {
-                                                child_prefix,
-                                                parent,
-                                                child,
-                                            } => {
-                                                (Some(child_prefix), open_dir_fd(&parent, &child)?)
-                                            }
-                                        };
-                                        let dir = rustix::fs::Dir::read_from(&dir_fd)?;
-                                        Ok((prefix, dir, dir_fd))
-                                    })
-                                    .await?;
-
-                                    NextTask::ReadNextEntry {
-                                        dir_fds,
-                                        dir,
-                                        dir_fd,
-                                        prefix,
-                                        state,
-                                    }
-                                }
-                                NextTask::ReadNextEntry {
-                                    mut dir_fds,
-                                    mut dir,
-                                    dir_fd,
-                                    prefix,
-                                    state,
-                                } => {
-                                    let read_res = spawn_io(move || {
-                                        loop {
-                                            match dir.read() {
-                                                // skip special entries
-                                                Some(Ok(entry))
-                                                    if entry.file_name().to_bytes() == b"." => {}
-                                                Some(Ok(entry))
-                                                    if entry.file_name().to_bytes() == b".." => {}
-                                                // found something
-                                                Some(Ok(entry)) => return Ok(Some((dir, entry))),
-                                                // error
-                                                Some(Err(e)) => return Err(e.into()),
-                                                // end
-                                                None => return Ok(None),
-                                            }
-                                        }
-                                    })
-                                    .await?;
-
-                                    match read_res {
-                                        None => {
-                                            // end of directory
-                                            NextTask::OpenDir { dir_fds, state }
-                                        }
-                                        Some((dir, entry)) => {
-                                            let child_str =
-                                                entry.file_name().to_str().map_err(|e| {
-                                                    Error::Generic {
-                                                        store: STORE_NAME,
-                                                        source: Box::new(e),
-                                                    }
-                                                })?;
-                                            let child_path = match &prefix {
-                                                Some(prefix) => prefix.clone().join(child_str),
-                                                None => Path::parse(child_str)?,
-                                            };
-                                            let child_string = child_str.to_owned();
-
-                                            match entry.file_type() {
-                                                FileType::RegularFile => {
-                                                    let (dir_fd, stat) = spawn_io(move || {
-                                                        let stat = rustix::fs::statat(
-                                                            &dir_fd,
-                                                            &child_string,
-                                                            AtFlags::empty(),
-                                                        )?;
-                                                        Ok((dir_fd, stat))
-                                                    })
-                                                    .await?;
-                                                    let meta = ObjectMeta {
-                                                        location: child_path,
-                                                        last_modified: DateTime::from_timestamp(
-                                                            stat.st_mtime as _,
-                                                            stat.st_mtime_nsec as _,
-                                                        )
-                                                        .ok_or_else(|| Error::Generic {
-                                                            store: STORE_NAME,
-                                                            source: "cannot read mtime"
-                                                                .to_owned()
-                                                                .into(),
-                                                        })?,
-                                                        size: stat.st_size as _,
-                                                        e_tag: None,
-                                                        version: None,
-                                                    };
-                                                    let task = NextTask::ReadNextEntry {
-                                                        dir_fds,
-                                                        dir,
-                                                        dir_fd,
-                                                        prefix,
-                                                        state,
-                                                    };
-
-                                                    return Ok(Some((meta, task)));
-                                                }
-                                                FileType::Directory => {
-                                                    dir_fds.push(DirFd::Lazy {
-                                                        child_prefix: child_path,
-                                                        parent: Arc::clone(&dir_fd),
-                                                        child: child_string,
-                                                    });
-
-                                                    NextTask::ReadNextEntry {
-                                                        dir_fds,
-                                                        dir,
-                                                        dir_fd,
-                                                        prefix,
-                                                        state,
-                                                    }
-                                                }
-                                                other => {
-                                                    return Err(Error::Generic {
-                                                        store: STORE_NAME,
-                                                        source: format!(
-                                                            "invalid file type: {other:?}"
-                                                        )
-                                                        .into(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            };
-                        }
-                    },
-                );
-
-                Result::<_, Error>::Ok(stream)
-            })
-            .try_flatten(),
-        )
+        crate::list::list(Arc::clone(&self.state), prefix.cloned())
     }
 
     fn list_with_offset(
@@ -364,11 +249,8 @@ impl ObjectStore for LinuxFS {
         }))
     }
 
-    async fn list_with_delimiter(&self, _prefix: Option<&Path>) -> Result<ListResult> {
-        Err(Error::NotImplemented {
-            operation: "list_with_delimiter".to_owned(),
-            implementer: STORE_NAME.to_owned(),
-        })
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
+        crate::list::list_with_delimiter(Arc::clone(&self.state), prefix.cloned()).await
     }
 
     async fn copy_opts(&self, _from: &Path, _to: &Path, _options: CopyOptions) -> Result<()> {
