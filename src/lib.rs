@@ -340,6 +340,9 @@ impl ObjectStore for LinuxFS {
             )
             .into_get_err(&from)?;
 
+            let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
+            stat_to_meta(stat, from.clone())?;
+
             rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
                 .into_other_err()?;
             Ok(())
