@@ -131,51 +131,10 @@ impl ObjectStore for LinuxFS {
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
-        let GetOptions {
-            if_match,
-            if_none_match,
-            if_modified_since,
-            if_unmodified_since,
-            range,
-            version,
-            head,
-            // ignore extensions
-            extensions: _,
-        } = options;
-        if let Some(if_match) = if_match {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(if_match={if_match})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        if let Some(if_none_match) = if_none_match {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(if_none_match={if_none_match})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        if let Some(if_modified_since) = if_modified_since {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(if_modified_since={if_modified_since})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        if let Some(if_unmodified_since) = if_unmodified_since {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(if_unmodified_since={if_unmodified_since})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        if let Some(range) = range {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(range={range})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        if let Some(version) = version {
-            return Err(Error::NotImplemented {
-                operation: format!("get_opts(version={version})"),
-                implementer: STORE_NAME.to_owned(),
+        if options.version.is_some() {
+            return Err(Error::Precondition {
+                path: location.to_string(),
+                source: "versions are not used".to_owned().into(),
             });
         }
 
@@ -188,24 +147,39 @@ impl ObjectStore for LinuxFS {
             let file_fd =
                 rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
                     .into_get_err(&location)?;
+
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
             let meta = stat_to_meta(stat, location.clone())?;
+            options.check_preconditions(&meta)?;
 
-            let range = 0..meta.size;
+            let range = match options.range {
+                None => 0..meta.size,
+                Some(range) => range.as_range(meta.size).map_err(|e| Error::Generic {
+                    store: STORE_NAME,
+                    source: Box::new(e),
+                })?,
+            };
             let location = Arc::new(location);
 
-            let stream = if head || range.is_empty() {
+            let stream = if options.head || range.is_empty() {
                 Box::pin(futures_util::stream::empty()) as BoxStream<'static, Result<Bytes>>
             } else {
                 let buf = vec![0; READ_BUFFER_SIZE];
                 Box::pin(futures_util::stream::try_unfold(
-                    (file_fd, buf, 0usize),
-                    move |(file_fd, mut buf, offset)| {
+                    (file_fd, buf, range.start as usize, range.end as usize),
+                    move |(file_fd, mut buf, offset, range_end)| {
                         let location = Arc::clone(&location);
                         spawn_io(move || {
+                            let whats_left = range_end - offset;
+                            if whats_left == 0 {
+                                drop(file_fd);
+                                return Ok(None);
+                            }
+
+                            let to_read = buf.len().min(whats_left);
                             let got = rustix::io::preadv2(
                                 &file_fd,
-                                &mut [IoSliceMut::new(&mut buf)],
+                                &mut [IoSliceMut::new(&mut buf[..to_read])],
                                 offset as _,
                                 rwflags(),
                             )
@@ -217,7 +191,7 @@ impl ObjectStore for LinuxFS {
                             } else {
                                 let bytes = Bytes::from(buf[..got].to_owned());
                                 let offset = offset + got;
-                                Ok(Some((bytes, (file_fd, buf, offset))))
+                                Ok(Some((bytes, (file_fd, buf, offset, range_end))))
                             }
                         })
                     },
@@ -235,11 +209,54 @@ impl ObjectStore for LinuxFS {
         .await
     }
 
-    async fn get_ranges(&self, _location: &Path, _ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        Err(Error::NotImplemented {
-            operation: "get_ranges".to_owned(),
-            implementer: STORE_NAME.to_owned(),
+    async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let (dirs, file) = split_dirs_and_filename(location)?;
+        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
+        let file = file.to_owned();
+        let location = location.clone();
+        let ranges = ranges.to_vec();
+
+        spawn_io(move || {
+            let file_fd =
+                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
+                    .into_get_err(&location)?;
+
+            let mut bytes_vec = Vec::with_capacity(ranges.len());
+
+            for range in ranges {
+                let mut buffer = vec![0u8; range.clone().count()];
+                let mut buffer_offset = 0usize;
+
+                let mut file_offset = range.start;
+
+                loop {
+                    let to_read = range.end.saturating_sub(file_offset);
+                    if to_read == 0 {
+                        break;
+                    }
+
+                    let got = rustix::io::preadv2(
+                        &file_fd,
+                        &mut [IoSliceMut::new(
+                            &mut buffer[buffer_offset..(buffer_offset + to_read as usize)],
+                        )],
+                        file_offset,
+                        rwflags(),
+                    )
+                    .into_get_err(&location)?;
+
+                    buffer_offset += got;
+                    file_offset += got as u64;
+                }
+
+                bytes_vec.push(Bytes::from(buffer));
+            }
+
+            drop(file_fd);
+
+            Ok(bytes_vec)
         })
+        .await
     }
 
     fn delete_stream(
