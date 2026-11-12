@@ -246,7 +246,7 @@ impl NextTask {
                         )?;
                         let child_path = match &prefix {
                             Some(prefix) => prefix.clone().join(decoded.as_ref()),
-                            None => Path::parse(decoded)?,
+                            None => Path::parse(child_str)?,
                         };
                         let child_string = child_str.to_owned();
 
