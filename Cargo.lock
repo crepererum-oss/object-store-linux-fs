@@ -434,6 +434,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "object_store",
+ "percent-encoding",
  "rustix",
  "tempfile",
  "tokio",
