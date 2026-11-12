@@ -165,6 +165,14 @@ impl NextTask {
                 state,
             })),
             Err(Error::NotFound { .. }) => Ok(None),
+            Err(Error::Generic { source, .. })
+                if source
+                    .downcast_ref::<std::io::Error>()
+                    .map(|e| e.kind() == std::io::ErrorKind::NotADirectory)
+                    .unwrap_or_default() =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }

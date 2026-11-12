@@ -47,7 +47,6 @@ async fn get_opts() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "NotADirectory")]
 async fn list_uses_directories_correctly() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();

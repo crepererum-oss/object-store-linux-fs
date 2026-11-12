@@ -62,7 +62,7 @@ impl IOErrorExt for std::io::Error {
 
     fn into_list_err(self) -> Option<Self::Out> {
         match self.kind() {
-            ErrorKind::NotFound => None,
+            ErrorKind::NotFound | ErrorKind::NotADirectory => None,
             _ => Some(object_store::Error::Generic {
                 store: STORE_NAME,
                 source: Box::new(self),
