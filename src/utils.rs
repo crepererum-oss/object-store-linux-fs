@@ -5,7 +5,10 @@ use object_store::{
     Error, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path},
 };
-use rustix::fs::{Mode, OFlags, ResolveFlags, Stat};
+use rustix::{
+    fs::{Mode, OFlags, ResolveFlags, Stat},
+    io::ReadWriteFlags,
+};
 
 use crate::constants::STORE_NAME;
 
@@ -19,6 +22,14 @@ pub(crate) fn mode_create() -> Mode {
 
 pub(crate) fn rflags() -> ResolveFlags {
     ResolveFlags::BENEATH
+}
+
+pub(crate) fn rwflags() -> ReadWriteFlags {
+    // `RWF_DONTCACHE` is not in rustix yet
+    // https://github.com/torvalds/linux/blob/9d66f26fefacebfeed15de31c1123451a17ff119/include/uapi/linux/fs.h#L448-L449
+    // ReadWriteFlags::from_bits_retain(128)
+    // TODO: "don't cache" is not supported by tmpfs, so this makes testing harder. We'll likely need some feature detection.
+    ReadWriteFlags::empty()
 }
 
 pub(crate) async fn spawn_io<F, R>(f: F) -> Result<R>

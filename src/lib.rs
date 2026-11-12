@@ -1,4 +1,9 @@
-use std::{mem::MaybeUninit, ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    io::{IoSlice, IoSliceMut},
+    ops::Range,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,7 +20,7 @@ use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
     error::IOErrorExt,
     state::{OpenDirMode, State},
-    utils::{mode_create, rflags, spawn_io, split_dirs_and_filename, stat_to_meta},
+    utils::{mode_create, rflags, rwflags, spawn_io, split_dirs_and_filename, stat_to_meta},
 };
 
 mod constants;
@@ -85,11 +90,18 @@ impl ObjectStore for LinuxFS {
                 rflags(),
             )
             .into_other_err()?;
-            for part in payload {
-                let mut offset = 0;
-                while offset < part.len() {
-                    offset += rustix::io::write(&file_fd, &part[offset..]).into_other_err()?;
-                }
+
+            let mut slices = payload
+                .iter()
+                .map(|bytes| IoSlice::new(bytes))
+                .collect::<Vec<_>>();
+            let len = slices.iter().map(|s| s.len()).sum::<usize>();
+            let mut offset = 0;
+            while offset < len {
+                let written = rustix::io::pwritev2(&file_fd, &slices, offset as _, rwflags())
+                    .into_other_err()?;
+                offset += written;
+                IoSlice::advance_slices(&mut &mut slices[..], written);
             }
             rustix::fs::fsync(&file_fd).into_other_err()?;
 
@@ -185,21 +197,27 @@ impl ObjectStore for LinuxFS {
             let stream = if head || range.is_empty() {
                 Box::pin(futures_util::stream::empty()) as BoxStream<'static, Result<Bytes>>
             } else {
-                let buf = vec![MaybeUninit::<u8>::uninit(); READ_BUFFER_SIZE];
+                let buf = vec![0; READ_BUFFER_SIZE];
                 Box::pin(futures_util::stream::try_unfold(
-                    (file_fd, buf),
-                    move |(file_fd, mut buf)| {
+                    (file_fd, buf, 0usize),
+                    move |(file_fd, mut buf, offset)| {
                         let location = Arc::clone(&location);
                         spawn_io(move || {
-                            let (init, _uninit) =
-                                rustix::io::read(&file_fd, &mut buf).into_get_err(&location)?;
+                            let got = rustix::io::preadv2(
+                                &file_fd,
+                                &mut [IoSliceMut::new(&mut buf)],
+                                offset as _,
+                                rwflags(),
+                            )
+                            .into_get_err(&location)?;
 
-                            if init.is_empty() {
+                            if got == 0 {
                                 drop(file_fd);
                                 Ok(None)
                             } else {
-                                let bytes = Bytes::from(init.to_owned());
-                                Ok(Some((bytes, (file_fd, buf))))
+                                let bytes = Bytes::from(buf[..got].to_owned());
+                                let offset = offset + got;
+                                Ok(Some((bytes, (file_fd, buf, offset))))
                             }
                         })
                     },
