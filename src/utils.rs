@@ -23,7 +23,7 @@ pub(crate) fn rflags() -> ResolveFlags {
 
 pub(crate) async fn spawn_io<F, R>(f: F) -> Result<R>
 where
-    F: FnOnce() -> Result<R, std::io::Error> + Send + 'static,
+    F: FnOnce() -> Result<R> + Send + 'static,
     R: Send + 'static,
 {
     tokio::task::spawn_blocking(f)
@@ -32,10 +32,6 @@ where
             store: STORE_NAME,
             source: Box::new(e),
         })?
-        .map_err(|e| Error::Generic {
-            store: STORE_NAME,
-            source: Box::new(e),
-        })
 }
 
 pub(crate) fn split_dirs_and_filename(
@@ -51,7 +47,10 @@ pub(crate) fn split_dirs_and_filename(
         .map(|(dirs, filename)| (dirs.split(DELIMITER_CHAR), filename))
 }
 
-pub(crate) fn open_dir_fd(parent: &OwnedFd, child: &str) -> std::io::Result<Arc<OwnedFd>> {
+pub(crate) fn open_dir_fd(
+    parent: &OwnedFd,
+    child: &str,
+) -> Result<Arc<OwnedFd>, rustix::io::Errno> {
     // we still need to fsync because the creating thread/process might die before that
     // TODO: introduce a read-only flag where we could skip this
     rustix::fs::fsync(parent)?;

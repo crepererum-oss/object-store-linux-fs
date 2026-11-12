@@ -10,7 +10,8 @@ use rustix::fs::{AtFlags, FileType};
 
 use crate::{
     constants::STORE_NAME,
-    state::State,
+    error::IOErrorExt,
+    state::{OpenDirMode, State},
     utils::{open_dir_fd, spawn_io, stat_to_meta},
 };
 
@@ -20,26 +21,29 @@ pub(crate) fn list(
 ) -> BoxStream<'static, Result<ObjectMeta>> {
     Box::pin(
         futures_util::stream::once(async move {
-            let stream = futures_util::stream::try_unfold(
-                NextTask::start(state, prefix).await?,
-                async move |mut task| {
-                    loop {
-                        match task.next().await? {
-                            None => {
-                                return Ok(None);
-                            }
-                            Some((task_next, None)) => {
-                                task = task_next;
-                            }
-                            Some((task_next, Some(meta))) => {
-                                return Ok(Some((meta, task_next)));
+            match NextTask::start(state, prefix).await {
+                Ok(Some(task)) => {
+                    let stream = futures_util::stream::try_unfold(task, async move |mut task| {
+                        loop {
+                            match task.next().await? {
+                                None => {
+                                    return Ok(None);
+                                }
+                                Some((task_next, None)) => {
+                                    task = task_next;
+                                }
+                                Some((task_next, Some(meta))) => {
+                                    return Ok(Some((meta, task_next)));
+                                }
                             }
                         }
-                    }
-                },
-            );
+                    });
 
-            Result::<_, Error>::Ok(stream)
+                    Result::<_, Error>::Ok(Box::pin(stream) as BoxStream<'static, _>)
+                }
+                Ok(None) => Ok(Box::pin(futures_util::stream::empty()) as _),
+                Err(e) => Err(e),
+            }
         })
         .try_flatten(),
     )
@@ -49,7 +53,13 @@ pub(crate) async fn list_with_delimiter(
     state: Arc<State>,
     prefix: Option<Path>,
 ) -> Result<ListResult> {
-    let mut task = NextTask::start(state, prefix).await?;
+    let Some(mut task) = NextTask::start(state, prefix).await? else {
+        return Ok(ListResult {
+            common_prefixes: vec![],
+            objects: vec![],
+            extensions: Default::default(),
+        });
+    };
     let mut metas = vec![];
     loop {
         match task.next().await? {
@@ -119,20 +129,24 @@ enum NextTask {
 }
 
 impl NextTask {
-    async fn start(state: Arc<State>, prefix: Option<Path>) -> Result<Self> {
-        let dir_fd = match &prefix {
+    async fn start(state: Arc<State>, prefix: Option<Path>) -> Result<Option<Self>> {
+        let dir_fd_res = match &prefix {
             Some(prefix) => {
                 state
-                    .open_dir(prefix.as_ref().split(DELIMITER_CHAR), false)
-                    .await?
+                    .open_dir(prefix.as_ref().split(DELIMITER_CHAR), OpenDirMode::Get)
+                    .await
             }
-            None => state.open_dir(std::iter::empty(), false).await?,
+            None => state.open_dir(std::iter::empty(), OpenDirMode::Get).await,
         };
 
-        Ok(Self::OpenDir {
-            dir_fds: vec![DirFd::Eager { prefix, dir_fd }],
-            state,
-        })
+        match dir_fd_res {
+            Ok(dir_fd) => Ok(Some(Self::OpenDir {
+                dir_fds: vec![DirFd::Eager { prefix, dir_fd }],
+                state,
+            })),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn next(self) -> Result<Option<(Self, Option<ObjectMeta>)>> {
@@ -143,30 +157,45 @@ impl NextTask {
                     return Ok(None);
                 };
 
-                let (prefix, dir, dir_fd) = spawn_io(move || {
+                let maybe_opened = spawn_io(move || {
                     let (prefix, dir_fd) = match dir_fd {
                         DirFd::Eager { prefix, dir_fd } => (prefix, dir_fd),
                         DirFd::Lazy {
                             child_prefix,
                             parent,
                             child,
-                        } => (Some(child_prefix), open_dir_fd(&parent, &child)?),
+                        } => {
+                            let Some(dir_fd) =
+                                open_dir_fd(&parent, &child).into_list_err().transpose()?
+                            else {
+                                return Ok(None);
+                            };
+                            (Some(child_prefix), dir_fd)
+                        }
                     };
-                    let dir = rustix::fs::Dir::read_from(&dir_fd)?;
-                    Ok((prefix, dir, dir_fd))
+                    let Some(dir) = rustix::fs::Dir::read_from(&dir_fd)
+                        .into_list_err()
+                        .transpose()?
+                    else {
+                        return Ok(None);
+                    };
+                    Ok(Some((prefix, dir, dir_fd)))
                 })
                 .await?;
 
-                Ok(Some((
-                    Self::ReadNextEntry {
-                        dir_fds,
-                        dir,
-                        dir_fd,
-                        prefix,
-                        state,
-                    },
-                    None,
-                )))
+                match maybe_opened {
+                    Some((prefix, dir, dir_fd)) => Ok(Some((
+                        Self::ReadNextEntry {
+                            dir_fds,
+                            dir,
+                            dir_fd,
+                            prefix,
+                            state,
+                        },
+                        None,
+                    ))),
+                    None => Ok(Some((Self::OpenDir { dir_fds, state }, None))),
+                }
             }
             Self::ReadNextEntry {
                 mut dir_fds,
@@ -184,7 +213,10 @@ impl NextTask {
                             // found something
                             Some(Ok(entry)) => return Ok(Some((dir, entry))),
                             // error
-                            Some(Err(e)) => return Err(e.into()),
+                            Some(Err(e)) => match e.into_list_err() {
+                                Some(e) => return Err(e),
+                                None => return Ok(None),
+                            },
                             // end
                             None => return Ok(None),
                         }
@@ -210,16 +242,21 @@ impl NextTask {
 
                         match entry.file_type() {
                             FileType::RegularFile => {
-                                let (dir_fd, stat) = spawn_io(move || {
-                                    let stat = rustix::fs::statat(
+                                let (dir_fd, maybe_stat) = spawn_io(move || {
+                                    let maybe_stat = rustix::fs::statat(
                                         &dir_fd,
                                         &child_string,
                                         AtFlags::empty(),
-                                    )?;
-                                    Ok((dir_fd, stat))
+                                    )
+                                    .into_list_err()
+                                    .transpose()?;
+                                    Ok((dir_fd, maybe_stat))
                                 })
                                 .await?;
-                                let meta = stat_to_meta(stat, child_path)?;
+
+                                let meta = maybe_stat
+                                    .map(|stat| stat_to_meta(stat, child_path))
+                                    .transpose()?;
                                 let task = Self::ReadNextEntry {
                                     dir_fds,
                                     dir,
@@ -228,7 +265,7 @@ impl NextTask {
                                     state,
                                 };
 
-                                Ok(Some((task, Some(meta))))
+                                Ok(Some((task, meta)))
                             }
                             FileType::Directory => {
                                 dir_fds.push(DirFd::Lazy {

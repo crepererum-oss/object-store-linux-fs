@@ -13,11 +13,13 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 
 use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
-    state::State,
+    error::IOErrorExt,
+    state::{OpenDirMode, State},
     utils::{mode_create, rflags, spawn_io, split_dirs_and_filename, stat_to_meta},
 };
 
 mod constants;
+mod error;
 mod list;
 mod state;
 mod utils;
@@ -71,7 +73,7 @@ impl ObjectStore for LinuxFS {
         }
 
         let (dirs, file) = split_dirs_and_filename(location)?;
-        let dir_fd = self.state.open_dir(dirs, true).await?;
+        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
         let file = file.to_owned();
 
         spawn_io(move || {
@@ -81,17 +83,21 @@ impl ObjectStore for LinuxFS {
                 OFlags::TMPFILE | OFlags::WRONLY,
                 mode_create(),
                 rflags(),
-            )?;
+            )
+            .into_other_err()?;
             for part in payload {
                 let mut offset = 0;
                 while offset < part.len() {
-                    offset += rustix::io::write(&file_fd, &part[offset..])?;
+                    offset += rustix::io::write(&file_fd, &part[offset..]).into_other_err()?;
                 }
             }
-            rustix::fs::fsync(&file_fd)?;
+            rustix::fs::fsync(&file_fd).into_other_err()?;
 
-            rustix::fs::linkat(&file_fd, "", &dir_fd, file, AtFlags::EMPTY_PATH)?;
-            rustix::fs::fsync(&dir_fd)?;
+            rustix::fs::linkat(&file_fd, "", &dir_fd, file, AtFlags::EMPTY_PATH)
+                .into_other_err()?;
+            rustix::fs::fsync(&dir_fd).into_other_err()?;
+
+            drop(file_fd);
 
             Ok(())
         })
@@ -162,31 +168,40 @@ impl ObjectStore for LinuxFS {
         }
 
         let (dirs, file) = split_dirs_and_filename(location)?;
-        let dir_fd = self.state.open_dir(dirs, false).await?;
+        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
 
         spawn_io(move || {
             let file_fd =
-                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())?;
-            let stat = rustix::fs::fstat(&file_fd)?;
-            let meta = stat_to_meta(stat, location)?;
+                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
+                    .into_get_err(&location)?;
+            let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
+            let meta = stat_to_meta(stat, location.clone())?;
 
             let range = 0..meta.size;
+            let location = Arc::new(location);
 
-            let stream = if head {
+            let stream = if head || range.is_empty() {
                 Box::pin(futures_util::stream::empty()) as BoxStream<'static, Result<Bytes>>
             } else {
                 let buf = vec![MaybeUninit::<u8>::uninit(); READ_BUFFER_SIZE];
                 Box::pin(futures_util::stream::try_unfold(
                     (file_fd, buf),
-                    async |(file_fd, mut buf)| {
+                    move |(file_fd, mut buf)| {
+                        let location = Arc::clone(&location);
                         spawn_io(move || {
-                            let (init, _uninit) = rustix::io::read(&file_fd, &mut buf)?;
-                            let bytes = Bytes::from(init.to_owned());
-                            Ok(Some((bytes, (file_fd, buf))))
+                            let (init, _uninit) =
+                                rustix::io::read(&file_fd, &mut buf).into_get_err(&location)?;
+
+                            if init.is_empty() {
+                                drop(file_fd);
+                                Ok(None)
+                            } else {
+                                let bytes = Bytes::from(init.to_owned());
+                                Ok(Some((bytes, (file_fd, buf))))
+                            }
                         })
-                        .await
                     },
                 ))
             };
@@ -219,12 +234,13 @@ impl ObjectStore for LinuxFS {
             let state = Arc::clone(&state);
             async move {
                 let (dirs, file) = split_dirs_and_filename(&location)?;
-                let dir_fd = state.open_dir(dirs, false).await?;
+                let dir_fd = state.open_dir(dirs, OpenDirMode::Get).await?;
                 let file = file.to_owned();
-                spawn_io(move || {
-                    rustix::fs::unlinkat(&dir_fd, file, AtFlags::empty())?;
-                    rustix::fs::fsync(&dir_fd)?;
-                    Ok(())
+                let location = spawn_io(move || {
+                    rustix::fs::unlinkat(&dir_fd, file, AtFlags::empty())
+                        .into_get_err(&location)?;
+                    rustix::fs::fsync(&dir_fd).into_other_err()?;
+                    Ok(location)
                 })
                 .await?;
                 Ok(location)
