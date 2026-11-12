@@ -41,7 +41,6 @@ async fn get_nonexistent_object() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "Option::unwrap()")]
 async fn get_opts() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();

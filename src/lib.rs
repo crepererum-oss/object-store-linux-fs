@@ -1,5 +1,5 @@
 use std::{
-    io::{IoSlice, IoSliceMut},
+    io::{ErrorKind, IoSlice, IoSliceMut},
     ops::Range,
     path::PathBuf,
     sync::Arc,
@@ -80,8 +80,9 @@ impl ObjectStore for LinuxFS {
         let (dirs, file) = split_dirs_and_filename(location);
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
         let file = file.to_owned();
+        let location = location.clone();
 
-        spawn_io(move || {
+        let meta = spawn_io(move || {
             let file_fd = rustix::fs::openat2(
                 &dir_fd,
                 ".",
@@ -105,18 +106,40 @@ impl ObjectStore for LinuxFS {
             }
             rustix::fs::fsync(&file_fd).into_other_err()?;
 
-            rustix::fs::linkat(&file_fd, "", &dir_fd, file, AtFlags::EMPTY_PATH)
-                .into_other_err()?;
+            // we cannot use `linkat` w/ replacement,
+            // see https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
+            loop {
+                match rustix::fs::linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH) {
+                    Ok(()) => break,
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                        match rustix::fs::unlinkat(&dir_fd, &file, AtFlags::empty()) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == ErrorKind::NotFound => {
+                                // race
+                            }
+                            Err(e) => {
+                                return Err(e.into_other_err());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(e.into_other_err());
+                    }
+                }
+            }
             rustix::fs::fsync(&dir_fd).into_other_err()?;
+
+            let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
+            let meta = stat_to_meta(stat, location)?;
 
             drop(file_fd);
 
-            Ok(())
+            Ok(meta)
         })
         .await?;
 
         Ok(PutResult {
-            e_tag: None,
+            e_tag: meta.e_tag,
             version: None,
             extensions: Default::default(),
         })

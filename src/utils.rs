@@ -95,7 +95,7 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
                 source: "cannot read mtime".to_owned().into(),
             })?,
         size: stat.st_size as _,
-        e_tag: None,
+        e_tag: Some(stat.st_ino.to_string()),
         version: None,
     })
 }
