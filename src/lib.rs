@@ -287,20 +287,19 @@ impl ObjectStore for LinuxFS {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
-        crate::list::list(Arc::clone(&self.state), prefix.cloned())
+        crate::list::list(Arc::clone(&self.state), prefix.cloned(), None)
     }
 
     fn list_with_offset(
         &self,
-        _prefix: Option<&Path>,
-        _offset: &Path,
+        prefix: Option<&Path>,
+        offset: &Path,
     ) -> BoxStream<'static, Result<ObjectMeta>> {
-        Box::pin(futures_util::stream::once(async {
-            Err(Error::NotImplemented {
-                operation: "list_with_offset".to_owned(),
-                implementer: STORE_NAME.to_owned(),
-            })
-        }))
+        crate::list::list(
+            Arc::clone(&self.state),
+            prefix.cloned(),
+            Some(offset.clone()),
+        )
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {

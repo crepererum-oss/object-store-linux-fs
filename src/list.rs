@@ -18,26 +18,41 @@ use crate::{
 pub(crate) fn list(
     state: Arc<State>,
     prefix: Option<Path>,
+    offset: Option<Path>,
 ) -> BoxStream<'static, Result<ObjectMeta>> {
     Box::pin(
         futures_util::stream::once(async move {
             match NextTask::start(state, prefix).await {
                 Ok(Some(task)) => {
-                    let stream = futures_util::stream::try_unfold(task, async move |mut task| {
-                        loop {
-                            match task.next().await? {
-                                None => {
-                                    return Ok(None);
-                                }
-                                Some((task_next, None)) => {
-                                    task = task_next;
-                                }
-                                Some((task_next, Some(meta))) => {
-                                    return Ok(Some((meta, task_next)));
+                    let stream = futures_util::stream::try_unfold(
+                        (task, offset),
+                        async move |(mut task, offset)| {
+                            loop {
+                                match task.next().await? {
+                                    None => {
+                                        return Ok(None);
+                                    }
+                                    Some((task_next, None)) => {
+                                        // technically we could filter out branches that are not gonna help, but the
+                                        // tests in `object_store` is broken because they use `Path=String` for
+                                        // comparison, which isn't really hierarchical correct
+                                        task = task_next;
+                                    }
+                                    Some((task_next, Some(meta))) => {
+                                        if offset
+                                            .as_ref()
+                                            .map(|offset| &meta.location > offset)
+                                            .unwrap_or(true)
+                                        {
+                                            return Ok(Some((meta, (task_next, offset))));
+                                        } else {
+                                            task = task_next;
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    });
+                        },
+                    );
 
                     Result::<_, Error>::Ok(Box::pin(stream) as BoxStream<'static, _>)
                 }
