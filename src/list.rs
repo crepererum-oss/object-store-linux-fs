@@ -91,18 +91,23 @@ pub(crate) async fn list_with_delimiter(
                 }
                 match next_task {
                     NextTask::OpenDir { dir_fds, state: _ } => {
+                        let mut common_prefixes = dir_fds
+                            .into_iter()
+                            .map(|dir_fd| match dir_fd {
+                                DirFd::Eager { .. } => unreachable!(),
+                                DirFd::Lazy {
+                                    child_prefix,
+                                    parent: _,
+                                    child: _,
+                                } => child_prefix,
+                            })
+                            .collect::<Vec<_>>();
+
+                        // TODO: technically we don't need to sort `common_prefixes` here, but the `object_store` integration tests are broken
+                        common_prefixes.sort_unstable();
+
                         return Ok(ListResult {
-                            common_prefixes: dir_fds
-                                .into_iter()
-                                .map(|dir_fd| match dir_fd {
-                                    DirFd::Eager { .. } => unreachable!(),
-                                    DirFd::Lazy {
-                                        child_prefix,
-                                        parent: _,
-                                        child: _,
-                                    } => child_prefix,
-                                })
-                                .collect(),
+                            common_prefixes,
                             objects: metas,
                             extensions: Default::default(),
                         });

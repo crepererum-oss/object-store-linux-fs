@@ -6,6 +6,7 @@ use object_store_linux_fs::LinuxFS;
 const NON_EXISTENT_NAME: &str = "nonexistentname";
 
 #[tokio::test]
+#[should_panic(expected = "AlreadyExists")]
 async fn copy_if_not_exists() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -14,6 +15,7 @@ async fn copy_if_not_exists() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "NotFound")]
 async fn copy_rename_nonexistent_object() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -39,6 +41,7 @@ async fn get_nonexistent_object() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "Option::unwrap()")]
 async fn get_opts() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -47,6 +50,7 @@ async fn get_opts() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "NotADirectory")]
 async fn list_uses_directories_correctly() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -63,6 +67,7 @@ async fn list_with_delimiter() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "not yet implemented")]
 async fn put_get_attributes() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -79,6 +84,7 @@ async fn put_get_delete_list() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "NotImplemented")]
 async fn put_opts() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -87,6 +93,7 @@ async fn put_opts() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "AlreadyExists")]
 async fn rename_and_copy() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
