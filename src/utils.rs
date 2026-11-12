@@ -37,12 +37,16 @@ where
     F: FnOnce() -> Result<R> + Send + 'static,
     R: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Error::Generic {
-            store: STORE_NAME,
-            source: Box::new(e),
-        })?
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        if e.is_panic() {
+            std::panic::resume_unwind(e.into_panic())
+        } else {
+            Error::Generic {
+                store: STORE_NAME,
+                source: Box::new(e),
+            }
+        }
+    })?
 }
 
 pub(crate) fn split_dirs_and_filename<'a>(
