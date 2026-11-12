@@ -64,6 +64,14 @@ async fn list_with_delimiter() {
 }
 
 #[tokio::test]
+async fn list_with_offset_exclusivity() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    object_store::integration::list_with_offset_exclusivity(&storage).await;
+}
+
+#[tokio::test]
 #[should_panic(expected = "not yet implemented")]
 async fn put_get_attributes() {
     let path = tempfile::tempdir().unwrap();
@@ -95,4 +103,13 @@ async fn rename_and_copy() {
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
 
     object_store::integration::rename_and_copy(&storage).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "not yet implemented")]
+async fn stream_get() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    object_store::integration::stream_get(&storage).await;
 }
