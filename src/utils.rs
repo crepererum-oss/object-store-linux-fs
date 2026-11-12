@@ -6,7 +6,7 @@ use object_store::{
     path::{DELIMITER_CHAR, Path},
 };
 use rustix::{
-    fs::{Mode, OFlags, ResolveFlags, Stat},
+    fs::{FileType, Mode, OFlags, ResolveFlags, Stat},
     io::ReadWriteFlags,
 };
 
@@ -67,6 +67,22 @@ pub(crate) fn open_dir_fd(
 }
 
 pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::RegularFile => {}
+        FileType::Directory => {
+            return Err(Error::NotFound {
+                path: location.to_string(),
+                source: "is a directory".to_owned().into(),
+            });
+        }
+        other => {
+            return Err(Error::Generic {
+                store: STORE_NAME,
+                source: format!("illegal file type: {other:?}").into(),
+            });
+        }
+    }
+
     Ok(ObjectMeta {
         location,
         last_modified: DateTime::from_timestamp(stat.st_mtime as _, stat.st_mtime_nsec as _)

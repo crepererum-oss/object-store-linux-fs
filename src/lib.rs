@@ -221,6 +221,9 @@ impl ObjectStore for LinuxFS {
                 rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
                     .into_get_err(&location)?;
 
+            let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
+            stat_to_meta(stat, location.clone())?;
+
             let mut bytes_vec = Vec::with_capacity(ranges.len());
 
             for range in ranges {
