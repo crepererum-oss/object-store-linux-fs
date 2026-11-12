@@ -1,4 +1,4 @@
-use std::{os::fd::OwnedFd, sync::Arc};
+use std::{io::ErrorKind, os::fd::OwnedFd, sync::Arc};
 
 use chrono::DateTime;
 use object_store::{
@@ -6,7 +6,7 @@ use object_store::{
     path::{DELIMITER_CHAR, Path},
 };
 use rustix::{
-    fs::{FileType, Mode, OFlags, ResolveFlags, Stat},
+    fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, Stat},
     io::ReadWriteFlags,
 };
 
@@ -98,4 +98,34 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
         e_tag: Some(stat.st_ino.to_string()),
         version: None,
     })
+}
+
+pub(crate) fn link_at_replace(
+    file_fd: &OwnedFd,
+    dir_fd: &OwnedFd,
+    file: &str,
+) -> Result<(), rustix::io::Errno> {
+    // we cannot use `linkat` w/ replacement,
+    // see https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
+    loop {
+        match rustix::fs::linkat(file_fd, "", dir_fd, file, AtFlags::EMPTY_PATH) {
+            Ok(()) => {
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                match rustix::fs::unlinkat(dir_fd, file, AtFlags::empty()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        // race
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
 }

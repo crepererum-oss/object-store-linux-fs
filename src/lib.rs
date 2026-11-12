@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, IoSlice, IoSliceMut},
+    io::{IoSlice, IoSliceMut},
     ops::Range,
     path::PathBuf,
     sync::Arc,
@@ -20,7 +20,10 @@ use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
     error::IOErrorExt,
     state::{OpenDirMode, State},
-    utils::{mode_create, rflags, rwflags, spawn_io, split_dirs_and_filename, stat_to_meta},
+    utils::{
+        link_at_replace, mode_create, rflags, rwflags, spawn_io, split_dirs_and_filename,
+        stat_to_meta,
+    },
 };
 
 mod constants;
@@ -106,27 +109,7 @@ impl ObjectStore for LinuxFS {
             }
             rustix::fs::fsync(&file_fd).into_other_err()?;
 
-            // we cannot use `linkat` w/ replacement,
-            // see https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
-            loop {
-                match rustix::fs::linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH) {
-                    Ok(()) => break,
-                    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                        match rustix::fs::unlinkat(&dir_fd, &file, AtFlags::empty()) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == ErrorKind::NotFound => {
-                                // race
-                            }
-                            Err(e) => {
-                                return Err(e.into_other_err());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        return Err(e.into_other_err());
-                    }
-                }
-            }
+            link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
             rustix::fs::fsync(&dir_fd).into_other_err()?;
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
@@ -365,8 +348,7 @@ impl ObjectStore for LinuxFS {
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
-                .into_other_err()?;
+            link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
             rustix::fs::fsync(&to_dir_fd).into_other_err()?;
 
             Ok(())
@@ -410,8 +392,7 @@ impl ObjectStore for LinuxFS {
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
-                .into_other_err()?;
+            link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
             rustix::fs::unlinkat(&from_dir_fd, from_file, AtFlags::empty()).into_get_err(&from)?;
 
             // fsync AFTER both operations complete and in-order
