@@ -12,7 +12,7 @@ use futures_util::TryStreamExt;
 use object_store::{
     CopyMode, CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult,
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions, Result, path::Path,
+    PutResult, RenameOptions, RenameTargetMode, Result, path::Path,
 };
 use rustix::fs::{AtFlags, Mode, OFlags};
 
@@ -352,10 +352,52 @@ impl ObjectStore for LinuxFS {
         .await
     }
 
-    async fn rename_opts(&self, _from: &Path, _to: &Path, _options: RenameOptions) -> Result<()> {
-        Err(Error::NotImplemented {
-            operation: "rename_opts".to_owned(),
-            implementer: STORE_NAME.to_owned(),
+    async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> Result<()> {
+        let RenameOptions {
+            target_mode,
+            // ignore extensions
+            extensions: _,
+        } = options;
+        if target_mode != RenameTargetMode::Overwrite {
+            return Err(Error::NotImplemented {
+                operation: format!("rename_opts(target_mode={target_mode:?})"),
+                implementer: STORE_NAME.to_owned(),
+            });
+        }
+
+        let (from_dirs, from_file) = split_dirs_and_filename(from);
+        let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
+
+        let (to_dirs, to_file) = split_dirs_and_filename(to);
+        let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+
+        let from_file = from_file.to_owned();
+        let to_file = to_file.to_owned();
+        let from = from.clone();
+
+        spawn_io(move || {
+            let file_fd = rustix::fs::openat2(
+                &from_dir_fd,
+                &from_file,
+                OFlags::RDONLY,
+                Mode::empty(),
+                rflags(),
+            )
+            .into_get_err(&from)?;
+
+            let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
+            stat_to_meta(stat, from.clone())?;
+
+            rustix::fs::linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
+                .into_other_err()?;
+            rustix::fs::unlinkat(&from_dir_fd, from_file, AtFlags::empty()).into_get_err(&from)?;
+
+            // fsync AFTER both operations complete and in-order
+            rustix::fs::fsync(&to_dir_fd).into_other_err()?;
+            rustix::fs::fsync(&from_dir_fd).into_other_err()?;
+
+            Ok(())
         })
+        .await
     }
 }
