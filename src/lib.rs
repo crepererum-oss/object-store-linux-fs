@@ -77,7 +77,7 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location)?;
+        let (dirs, file) = split_dirs_and_filename(location);
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
         let file = file.to_owned();
 
@@ -138,7 +138,7 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location)?;
+        let (dirs, file) = split_dirs_and_filename(location);
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -210,7 +210,7 @@ impl ObjectStore for LinuxFS {
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let (dirs, file) = split_dirs_and_filename(location)?;
+        let (dirs, file) = split_dirs_and_filename(location);
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -268,7 +268,7 @@ impl ObjectStore for LinuxFS {
         Box::pin(locations.and_then(move |location| {
             let state = Arc::clone(&state);
             async move {
-                let (dirs, file) = split_dirs_and_filename(&location)?;
+                let (dirs, file) = split_dirs_and_filename(&location);
                 let dir_fd = state.open_dir(dirs, OpenDirMode::Get).await?;
                 let file = file.to_owned();
                 let location = spawn_io(move || {
@@ -317,10 +317,10 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (from_dirs, from_file) = split_dirs_and_filename(from)?;
+        let (from_dirs, from_file) = split_dirs_and_filename(from);
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dirs, to_file) = split_dirs_and_filename(to)?;
+        let (to_dirs, to_file) = split_dirs_and_filename(to);
         let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
 
         let from_file = from_file.to_owned();

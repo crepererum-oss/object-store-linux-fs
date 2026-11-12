@@ -45,17 +45,13 @@ where
         })?
 }
 
-pub(crate) fn split_dirs_and_filename(
-    location: &Path,
-) -> Result<(impl Iterator<Item = &str>, &str)> {
-    location
-        .as_ref()
-        .rsplit_once(DELIMITER_CHAR)
-        .ok_or_else(|| Error::NotFound {
-            path: location.to_string(),
-            source: "filename cannot be root".to_owned().into(),
-        })
-        .map(|(dirs, filename)| (dirs.split(DELIMITER_CHAR), filename))
+pub(crate) fn split_dirs_and_filename<'a>(
+    location: &'a Path,
+) -> (Box<dyn Iterator<Item = &'a str> + Send + 'a>, &'a str) {
+    match location.as_ref().rsplit_once(DELIMITER_CHAR) {
+        Some((dirs, filename)) => (Box::new(dirs.split(DELIMITER_CHAR)) as _, filename),
+        None => (Box::new(std::iter::empty()), location.as_ref()),
+    }
 }
 
 pub(crate) fn open_dir_fd(
