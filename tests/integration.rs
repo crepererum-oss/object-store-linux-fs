@@ -6,7 +6,6 @@ use object_store_linux_fs::LinuxFS;
 const NON_EXISTENT_NAME: &str = "nonexistentname";
 
 #[tokio::test]
-#[should_panic(expected = "AlreadyExists")]
 async fn copy_if_not_exists() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -15,7 +14,6 @@ async fn copy_if_not_exists() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "NotFound")]
 async fn copy_rename_nonexistent_object() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();

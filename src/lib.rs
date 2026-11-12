@@ -318,12 +318,6 @@ impl ObjectStore for LinuxFS {
             // ignore extensions
             extensions: _,
         } = options;
-        if mode != CopyMode::Overwrite {
-            return Err(Error::NotImplemented {
-                operation: format!("copy_opts(mode={mode:?})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
 
         let (from_dirs, from_file) = split_dirs_and_filename(from);
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
@@ -334,6 +328,7 @@ impl ObjectStore for LinuxFS {
         let from_file = from_file.to_owned();
         let to_file = to_file.to_owned();
         let from = from.clone();
+        let to = to.clone();
 
         spawn_io(move || {
             let file_fd = rustix::fs::openat2(
@@ -348,7 +343,15 @@ impl ObjectStore for LinuxFS {
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
+            match mode {
+                CopyMode::Overwrite => {
+                    link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
+                }
+                CopyMode::Create => {
+                    rustix::fs::linkat(&file_fd, "", &to_dir_fd, &to_file, AtFlags::EMPTY_PATH)
+                        .into_put_err(to)?;
+                }
+            }
             rustix::fs::fsync(&to_dir_fd).into_other_err()?;
 
             Ok(())
@@ -362,13 +365,6 @@ impl ObjectStore for LinuxFS {
             // ignore extensions
             extensions: _,
         } = options;
-        if target_mode != RenameTargetMode::Overwrite {
-            return Err(Error::NotImplemented {
-                operation: format!("rename_opts(target_mode={target_mode:?})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-
         let (from_dirs, from_file) = split_dirs_and_filename(from);
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
@@ -378,6 +374,7 @@ impl ObjectStore for LinuxFS {
         let from_file = from_file.to_owned();
         let to_file = to_file.to_owned();
         let from = from.clone();
+        let to = to.clone();
 
         spawn_io(move || {
             let file_fd = rustix::fs::openat2(
@@ -392,7 +389,15 @@ impl ObjectStore for LinuxFS {
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
+            match target_mode {
+                RenameTargetMode::Overwrite => {
+                    link_at_replace(&file_fd, &to_dir_fd, &to_file).into_other_err()?;
+                }
+                RenameTargetMode::Create => {
+                    rustix::fs::linkat(&file_fd, "", &to_dir_fd, &to_file, AtFlags::EMPTY_PATH)
+                        .into_put_err(to)?;
+                }
+            }
             rustix::fs::unlinkat(&from_dir_fd, from_file, AtFlags::empty()).into_get_err(&from)?;
 
             // fsync AFTER both operations complete and in-order
