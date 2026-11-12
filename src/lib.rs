@@ -1,11 +1,4 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    io::ErrorKind,
-    ops::Range,
-    os::fd::OwnedFd,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{ops::Range, os::fd::OwnedFd, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,78 +11,17 @@ use object_store::{
     Result,
     path::{DELIMITER_CHAR, Path},
 };
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags};
-use tokio::sync::Mutex;
+use rustix::fs::{AtFlags, FileType, OFlags};
 
-use crate::constants::STORE_NAME;
+use crate::{
+    constants::STORE_NAME,
+    state::State,
+    utils::{mode_create, open_dir_fd, rflags, spawn_io, split_dirs_and_filename},
+};
 
 mod constants;
-
-#[derive(Debug)]
-struct State {
-    root: PathBuf,
-    dir_fd_cache: Mutex<HashMap<PathBuf, Arc<OwnedFd>>>,
-}
-
-impl State {
-    async fn new(root: PathBuf) -> Result<Self> {
-        let (root, root_fd) = spawn_io(move || {
-            std::fs::create_dir_all(&root)?;
-
-            let root_fd = rustix::fs::open(&root, dir_oflags(), Mode::empty())?;
-
-            Ok((root, root_fd))
-        })
-        .await?;
-
-        Ok(Self {
-            root: root.clone(),
-            dir_fd_cache: Mutex::new(HashMap::from([(root, Arc::new(root_fd))])),
-        })
-    }
-
-    async fn open_dir(
-        &self,
-        dirs: impl Iterator<Item = &str>,
-        create: bool,
-    ) -> Result<Arc<OwnedFd>> {
-        let mut dir_fd_cache = self.dir_fd_cache.lock().await;
-        let mut path = self.root.clone();
-        let mut dir_fd = Arc::clone(dir_fd_cache.get(&path).expect("root is always cached"));
-
-        // TODO: reverse order for faster probing
-        for part in dirs {
-            path = path.join(part);
-            dir_fd = match dir_fd_cache.entry(path.clone()) {
-                Entry::Occupied(o) => Arc::clone(o.get()),
-                Entry::Vacant(v) => {
-                    let part = part.to_owned();
-                    let sub_fd = spawn_io(move || {
-                        if create {
-                            // try to create dir
-                            match rustix::fs::mkdirat(&dir_fd, &part, mode_create()) {
-                                Ok(()) => {}
-                                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                                    // race
-                                }
-                                Err(e) => {
-                                    return Err(e.into());
-                                }
-                            }
-                        }
-
-                        open_dir_fd(&dir_fd, &part)
-                    })
-                    .await?;
-                    v.insert(Arc::clone(&sub_fd));
-                    sub_fd
-                }
-            };
-        }
-
-        Ok(dir_fd)
-    }
-}
+mod state;
+mod utils;
 
 #[derive(Debug)]
 pub struct LinuxFS {
@@ -106,7 +38,7 @@ impl LinuxFS {
 
 impl std::fmt::Display for LinuxFS {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{STORE_NAME}(\"{}\")", self.state.root.display())
+        write!(f, "{STORE_NAME}(\"{}\")", self.state.root().display())
     }
 }
 
@@ -452,53 +384,4 @@ impl ObjectStore for LinuxFS {
             implementer: STORE_NAME.to_owned(),
         })
     }
-}
-
-fn dir_oflags() -> OFlags {
-    OFlags::DIRECTORY | OFlags::NOFOLLOW
-}
-
-fn mode_create() -> Mode {
-    Mode::RWXU | Mode::RWXG
-}
-
-fn rflags() -> ResolveFlags {
-    ResolveFlags::BENEATH
-}
-
-async fn spawn_io<F, R>(f: F) -> Result<R>
-where
-    F: FnOnce() -> Result<R, std::io::Error> + Send + 'static,
-    R: Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| Error::Generic {
-            store: STORE_NAME,
-            source: Box::new(e),
-        })?
-        .map_err(|e| Error::Generic {
-            store: STORE_NAME,
-            source: Box::new(e),
-        })
-}
-
-fn split_dirs_and_filename(location: &Path) -> Result<(impl Iterator<Item = &str>, &str)> {
-    location
-        .as_ref()
-        .rsplit_once(DELIMITER_CHAR)
-        .ok_or_else(|| Error::NotFound {
-            path: location.to_string(),
-            source: "filename cannot be root".to_owned().into(),
-        })
-        .map(|(dirs, filename)| (dirs.split(DELIMITER_CHAR), filename))
-}
-
-fn open_dir_fd(parent: &OwnedFd, child: &str) -> std::io::Result<Arc<OwnedFd>> {
-    // we still need to fsync because the creating thread/process might die before that
-    // TODO: introduce a read-only flag where we could skip this
-    rustix::fs::fsync(parent)?;
-
-    let child_fd = rustix::fs::openat2(parent, child, dir_oflags(), Mode::empty(), rflags())?;
-    Ok(Arc::new(child_fd))
 }

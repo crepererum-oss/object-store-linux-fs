@@ -1,1 +1,1 @@
-pub const STORE_NAME: &str = "LinuxFS";
+pub(crate) const STORE_NAME: &str = "LinuxFS";
