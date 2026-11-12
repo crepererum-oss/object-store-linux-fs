@@ -4,9 +4,8 @@ use futures_core::stream::BoxStream;
 use futures_util::TryStreamExt;
 use object_store::{
     Error, ListResult, ObjectMeta, Result,
-    path::{DELIMITER_CHAR, Path},
+    path::{DELIMITER_CHAR, Path, PathPart},
 };
-use percent_encoding::percent_decode;
 use rustix::fs::{AtFlags, FileType};
 
 use crate::{
@@ -236,18 +235,15 @@ impl NextTask {
                             source: Box::new(e),
                         })?;
                         let child_path = match &prefix {
-                            Some(prefix) => {
-                                let decoded = percent_decode(child_str.as_bytes())
-                                    .decode_utf8()
-                                    .map_err(|source| Error::Generic {
-                                        store: STORE_NAME,
-                                        source: Box::new(object_store::path::Error::NonUnicode {
-                                            source,
-                                            path: child_str.to_owned(),
-                                        }),
-                                    })?;
-                                prefix.clone().join(decoded.as_ref())
-                            }
+                            Some(prefix) => prefix.clone().join(
+                                // parse part before handing it to join, because `PathPart::from(str)` will percent-encode it
+                                PathPart::parse(child_str).map_err(|e| Error::InvalidPath {
+                                    source: object_store::path::Error::BadSegment {
+                                        path: child_str.to_owned(),
+                                        source: e,
+                                    },
+                                })?,
+                            ),
                             None => Path::parse(child_str)?,
                         };
                         let child_string = child_str.to_owned();
