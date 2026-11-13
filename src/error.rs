@@ -12,6 +12,9 @@ pub(crate) trait IOErrorExt {
     fn into_put_err<L>(self, location: L) -> Self::Out
     where
         L: ToString;
+    fn into_update_err<L>(self, location: L) -> Self::Out
+    where
+        L: ToString;
     fn into_other_err(self) -> Self::Out;
 }
 
@@ -34,6 +37,13 @@ impl IOErrorExt for rustix::io::Errno {
         L: ToString,
     {
         std::io::Error::from(self).into_put_err(location)
+    }
+
+    fn into_update_err<L>(self, location: L) -> Self::Out
+    where
+        L: ToString,
+    {
+        std::io::Error::from(self).into_update_err(location)
     }
 
     fn into_other_err(self) -> Self::Out {
@@ -86,6 +96,22 @@ impl IOErrorExt for std::io::Error {
         }
     }
 
+    fn into_update_err<L>(self, location: L) -> Self::Out
+    where
+        L: ToString,
+    {
+        match self.kind() {
+            ErrorKind::NotFound => object_store::Error::Precondition {
+                path: location.to_string(),
+                source: Box::new(self),
+            },
+            _ => object_store::Error::Generic {
+                store: STORE_NAME,
+                source: Box::new(self),
+            },
+        }
+    }
+
     fn into_other_err(self) -> Self::Out {
         object_store::Error::Generic {
             store: STORE_NAME,
@@ -119,6 +145,13 @@ where
         L: ToString,
     {
         self.map_err(|e| e.into_put_err(location))
+    }
+
+    fn into_update_err<L>(self, location: L) -> Self::Out
+    where
+        L: ToString,
+    {
+        self.map_err(|e| e.into_update_err(location))
     }
 
     fn into_other_err(self) -> Self::Out {

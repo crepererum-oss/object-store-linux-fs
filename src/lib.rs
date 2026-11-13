@@ -12,7 +12,7 @@ use futures_util::TryStreamExt;
 use object_store::{
     CopyMode, CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult,
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions, RenameTargetMode, Result, path::Path,
+    PutResult, RenameOptions, RenameTargetMode, Result, UpdateVersion, path::Path,
 };
 use rustix::fs::{AtFlags, Mode};
 
@@ -21,8 +21,8 @@ use crate::{
     error::IOErrorExt,
     state::State,
     utils::{
-        OpenDirMode, link_at_replace, mode_create_file, oflags_create, oflags_read, rflags,
-        rwflags, spawn_io, split_dirs_and_filename, stat_to_meta,
+        OpenDirMode, flock_dir, link_at_replace, mode_create_file, oflags_create, oflags_read,
+        rflags, rwflags, same_dir, spawn_io, split_dirs_and_filename, stat_to_meta,
     },
 };
 
@@ -67,12 +67,6 @@ impl ObjectStore for LinuxFS {
             // ignore extensions
             extensions: _,
         } = opts;
-        if mode != PutMode::Overwrite {
-            return Err(Error::NotImplemented {
-                operation: format!("put_opts(mode={mode:?})"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
         if !attributes.is_empty() {
             return Err(Error::NotImplemented {
                 operation: "put_opts(attributes=<NOT_EMPTY>)".to_owned(),
@@ -80,7 +74,11 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Put)?;
+        let open_dir_mode = match &mode {
+            PutMode::Overwrite | PutMode::Create => OpenDirMode::Put,
+            PutMode::Update(_) => OpenDirMode::Update,
+        };
+        let (dirs, file) = split_dirs_and_filename(location, open_dir_mode)?;
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -104,13 +102,60 @@ impl ObjectStore for LinuxFS {
             }
             rustix::fs::fsync(&file_fd).into_other_err()?;
 
-            link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
+            let lock_fd = flock_dir(&dir_fd).into_other_err()?;
+
+            match mode {
+                PutMode::Overwrite => {
+                    link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
+                }
+                PutMode::Create => {
+                    rustix::fs::linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH)
+                        .into_put_err(&location)?;
+                }
+                PutMode::Update(UpdateVersion { e_tag, version }) => {
+                    let Some(e_tag) = e_tag else {
+                        return Err(Error::Precondition {
+                            path: location.to_string(),
+                            source: "need etag".to_owned().into(),
+                        });
+                    };
+                    if version.is_some() {
+                        return Err(Error::Precondition {
+                            path: location.to_string(),
+                            source: "versions are not used".to_owned().into(),
+                        });
+                    }
+
+                    let existing_fd =
+                        rustix::fs::openat2(&dir_fd, &file, oflags_read(), Mode::empty(), rflags())
+                            .into_update_err(&location)?;
+
+                    let existing_stat = rustix::fs::fstat(&existing_fd).into_get_err(&location)?;
+                    let existing_meta = stat_to_meta(existing_stat, location.clone())?;
+                    let existing_etag = existing_meta
+                        .e_tag
+                        .expect("fs implementation always provides etag");
+                    if existing_etag != e_tag {
+                        return Err(Error::Precondition {
+                            path: location.to_string(),
+                            source: format!(
+                                "requested etag='{}', got etag={}",
+                                e_tag, existing_etag,
+                            )
+                            .into(),
+                        });
+                    }
+
+                    link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
+                }
+            }
             rustix::fs::fsync(&dir_fd).into_other_err()?;
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
             let meta = stat_to_meta(stat, location)?;
 
             drop(file_fd);
+            drop(lock_fd);
 
             Ok(meta)
         })
@@ -276,6 +321,7 @@ impl ObjectStore for LinuxFS {
                 let dir_fd = state.open_dir(dirs, OpenDirMode::Get).await?;
                 let file = file.to_owned();
                 let location = spawn_io(move || {
+                    let _lock_fd = flock_dir(&dir_fd).into_other_err()?;
                     rustix::fs::unlinkat(&dir_fd, file, AtFlags::empty())
                         .into_get_err(&location)?;
                     rustix::fs::fsync(&dir_fd).into_other_err()?;
@@ -317,8 +363,14 @@ impl ObjectStore for LinuxFS {
         let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-        let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+        let (to_dir_fd, to_file) = if same_dir(from, to) {
+            let (_to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
+            (Arc::clone(&from_dir_fd), to_file)
+        } else {
+            let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
+            let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+            (to_dir_fd, to_file)
+        };
 
         let from_file = from_file.to_owned();
         let to_file = to_file.to_owned();
@@ -337,6 +389,8 @@ impl ObjectStore for LinuxFS {
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
+
+            let _to_lock_fd = flock_dir(&to_dir_fd).into_other_err()?;
 
             match mode {
                 CopyMode::Overwrite => {
@@ -363,8 +417,14 @@ impl ObjectStore for LinuxFS {
         let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-        let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+        let (to_dir_fd, to_file) = if same_dir(from, to) {
+            let (_to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
+            (Arc::clone(&from_dir_fd), to_file)
+        } else {
+            let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
+            let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
+            (to_dir_fd, to_file)
+        };
 
         let from_file = from_file.to_owned();
         let to_file = to_file.to_owned();
@@ -383,6 +443,14 @@ impl ObjectStore for LinuxFS {
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
+
+            let _from_lock_fd = flock_dir(&from_dir_fd).into_other_err()?;
+            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
+                // don't lock the same directory twice! (deadlock)
+                None
+            } else {
+                Some(flock_dir(&to_dir_fd).into_other_err()?)
+            };
 
             match target_mode {
                 RenameTargetMode::Overwrite => {

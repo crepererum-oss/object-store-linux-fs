@@ -6,7 +6,7 @@ use object_store::{
     path::{DELIMITER_CHAR, Path},
 };
 use rustix::{
-    fs::{AtFlags, FileType, Mode, OFlags, RenameFlags, ResolveFlags, Stat},
+    fs::{AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat},
     io::ReadWriteFlags,
 };
 use uuid::Uuid;
@@ -70,6 +70,7 @@ where
 pub(crate) enum OpenDirMode {
     Get,
     Put,
+    Update,
 }
 
 pub(crate) type DirsIt<'a> = Box<dyn Iterator<Item = Result<&'a str>> + Send + 'a>;
@@ -78,18 +79,14 @@ pub(crate) fn split_dirs_and_filename<'a>(
     location: &'a Path,
     mode: OpenDirMode,
 ) -> Result<(DirsIt<'a>, &'a str)> {
-    let (dirs, filename) = match location.as_ref().rsplit_once(DELIMITER_CHAR) {
-        Some((dirs, filename)) => {
-            let dirs = Box::new(dirs.split(DELIMITER_CHAR).map(move |s| {
-                check_staging_prefix(s, mode, location)?;
-                Ok(s)
-            })) as _;
-            (dirs, filename)
-        }
-        None => {
-            let dirs = Box::new(std::iter::empty()) as _;
-            (dirs, location.as_ref())
-        }
+    let (dirs, filename) = split_dirs_and_filename_str(location);
+
+    let dirs = match dirs {
+        Some(dirs) => Box::new(dirs.split(DELIMITER_CHAR).map(move |s| {
+            check_staging_prefix(s, mode, location)?;
+            Ok(s)
+        })) as _,
+        None => Box::new(std::iter::empty()) as _,
     };
 
     check_staging_prefix(filename, mode, location)?;
@@ -106,10 +103,23 @@ fn check_staging_prefix(filename: &str, mode: OpenDirMode, location: &Path) -> R
                 path: location.to_string(),
                 source,
             }),
-            OpenDirMode::Put => Err(Error::NotSupported { source }),
+            OpenDirMode::Put | OpenDirMode::Update => Err(Error::NotSupported { source }),
         }
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn same_dir(loc1: &Path, loc2: &Path) -> bool {
+    let (dirs1, _) = split_dirs_and_filename_str(loc1);
+    let (dirs2, _) = split_dirs_and_filename_str(loc2);
+    dirs1 == dirs2
+}
+
+fn split_dirs_and_filename_str(location: &Path) -> (Option<&str>, &str) {
+    match location.as_ref().rsplit_once(DELIMITER_CHAR) {
+        Some((dirs, filename)) => (Some(dirs), filename),
+        None => (None, location.as_ref()),
     }
 }
 
@@ -198,4 +208,20 @@ fn staging_file_name(filename: &str) -> String {
 
     // NOTE: the prefix already contains a `.`, so we don't need yet another one
     format!("{STAGING_FILE_PREFIX}{filename}.{uuid}")
+}
+
+pub(crate) fn flock_dir(dir_fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
+    // TODO: There is no way to replace-override with a file descriptor. Hence we need to use
+    //       directory-based locking to ensure the file doesn't change while we're at it. This is
+    //       somewhat similar (but not identical) to:
+    //
+    //       - https://uapi-group.org/kernel-features/#unlinking-via-two-file-descriptors
+    //       - https://bugzilla.kernel.org/show_bug.cgi?id=93441
+
+    // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
+    // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
+    let lock_fd = rustix::fs::openat(dir_fd, ".", oflags_read(), Mode::empty())?;
+    rustix::fs::flock(&lock_fd, FlockOperation::LockExclusive)?;
+
+    Ok(lock_fd)
 }

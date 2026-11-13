@@ -74,6 +74,7 @@ impl State {
                         let sub_fd = match mode {
                             OpenDirMode::Get => sub_fd_res.into_get_err(&prefix)?,
                             OpenDirMode::Put => sub_fd_res.into_other_err()?,
+                            OpenDirMode::Update => sub_fd_res.into_update_err(&prefix)?,
                         };
                         Ok((sub_fd, prefix))
                     })
