@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     error::IOErrorExt,
-    utils::{dir_oflags, mode_create, open_dir_fd, spawn_io},
+    utils::{OpenDirMode, dir_oflags, mode_create, open_dir_fd, spawn_io},
 };
 
 #[derive(Debug)]
@@ -39,7 +39,7 @@ impl State {
 
     pub(crate) async fn open_dir(
         &self,
-        dirs: impl Iterator<Item = &str>,
+        dirs: impl Iterator<Item = Result<&str>>,
         mode: OpenDirMode,
     ) -> Result<Arc<OwnedFd>> {
         let mut dir_fd_cache = self.dir_fd_cache.lock().await;
@@ -49,6 +49,7 @@ impl State {
 
         // TODO: reverse order for faster probing
         for part in dirs {
+            let part = part?;
             path = path.join(part);
             dir_fd = match dir_fd_cache.entry(path.clone()) {
                 Entry::Occupied(o) => Arc::clone(o.get()),
@@ -89,10 +90,4 @@ impl State {
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpenDirMode {
-    Get,
-    Put,
 }

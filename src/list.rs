@@ -9,10 +9,10 @@ use object_store::{
 use rustix::fs::{AtFlags, FileType};
 
 use crate::{
-    constants::STORE_NAME,
+    constants::{STAGING_FILE_PREFIX, STORE_NAME},
     error::IOErrorExt,
-    state::{OpenDirMode, State},
-    utils::{open_dir_fd, spawn_io, stat_to_meta},
+    state::State,
+    utils::{OpenDirMode, open_dir_fd, spawn_io, stat_to_meta},
 };
 
 pub(crate) fn list(
@@ -153,7 +153,10 @@ impl NextTask {
         let dir_fd_res = match &prefix {
             Some(prefix) => {
                 state
-                    .open_dir(prefix.as_ref().split(DELIMITER_CHAR), OpenDirMode::Get)
+                    .open_dir(
+                        prefix.as_ref().split(DELIMITER_CHAR).map(Ok),
+                        OpenDirMode::Get,
+                    )
                     .await
             }
             None => state.open_dir(std::iter::empty(), OpenDirMode::Get).await,
@@ -238,6 +241,11 @@ impl NextTask {
                             // skip special entries
                             Some(Ok(entry)) if entry.file_name().to_bytes() == b"." => {}
                             Some(Ok(entry)) if entry.file_name().to_bytes() == b".." => {}
+                            Some(Ok(entry))
+                                if entry
+                                    .file_name()
+                                    .to_bytes()
+                                    .starts_with(STAGING_FILE_PREFIX.as_bytes()) => {}
                             // found something
                             Some(Ok(entry)) => return Ok(Some((dir, entry))),
                             // error

@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, os::fd::OwnedFd, sync::Arc};
+use std::{os::fd::OwnedFd, sync::Arc};
 
 use chrono::DateTime;
 use object_store::{
@@ -6,11 +6,12 @@ use object_store::{
     path::{DELIMITER_CHAR, Path},
 };
 use rustix::{
-    fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, Stat},
+    fs::{AtFlags, FileType, Mode, OFlags, RenameFlags, ResolveFlags, Stat},
     io::ReadWriteFlags,
 };
+use uuid::Uuid;
 
-use crate::constants::STORE_NAME;
+use crate::constants::{STAGING_FILE_PREFIX, STORE_NAME};
 
 pub(crate) fn dir_oflags() -> OFlags {
     OFlags::DIRECTORY | OFlags::NOFOLLOW
@@ -49,12 +50,50 @@ where
     })?
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenDirMode {
+    Get,
+    Put,
+}
+
+pub(crate) type DirsIt<'a> = Box<dyn Iterator<Item = Result<&'a str>> + Send + 'a>;
+
 pub(crate) fn split_dirs_and_filename<'a>(
     location: &'a Path,
-) -> (Box<dyn Iterator<Item = &'a str> + Send + 'a>, &'a str) {
-    match location.as_ref().rsplit_once(DELIMITER_CHAR) {
-        Some((dirs, filename)) => (Box::new(dirs.split(DELIMITER_CHAR)) as _, filename),
-        None => (Box::new(std::iter::empty()), location.as_ref()),
+    mode: OpenDirMode,
+) -> Result<(DirsIt<'a>, &'a str)> {
+    let (dirs, filename) = match location.as_ref().rsplit_once(DELIMITER_CHAR) {
+        Some((dirs, filename)) => {
+            let dirs = Box::new(dirs.split(DELIMITER_CHAR).map(move |s| {
+                check_staging_prefix(s, mode, location)?;
+                Ok(s)
+            })) as _;
+            (dirs, filename)
+        }
+        None => {
+            let dirs = Box::new(std::iter::empty()) as _;
+            (dirs, location.as_ref())
+        }
+    };
+
+    check_staging_prefix(filename, mode, location)?;
+
+    Ok((dirs, filename))
+}
+
+fn check_staging_prefix(filename: &str, mode: OpenDirMode, location: &Path) -> Result<()> {
+    if filename.starts_with(STAGING_FILE_PREFIX) {
+        let source = "cannot use staging prefix".to_owned().into();
+
+        match mode {
+            OpenDirMode::Get => Err(Error::NotFound {
+                path: location.to_string(),
+                source,
+            }),
+            OpenDirMode::Put => Err(Error::NotSupported { source }),
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -109,25 +148,38 @@ pub(crate) fn link_at_replace(
 ) -> Result<(), rustix::io::Errno> {
     // TODO: we cannot use `linkat` w/ replacement, see
     //       https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
-    loop {
-        match rustix::fs::linkat(file_fd, "", dir_fd, file, AtFlags::EMPTY_PATH) {
-            Ok(()) => {
-                return Ok(());
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                match rustix::fs::unlinkat(dir_fd, file, AtFlags::empty()) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == ErrorKind::NotFound => {
-                        // race
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(e);
-            }
+    //
+    // Due to the limitation in the Linux API, we need to use an alternative API instead. `renameat2` works, but
+    // requires a staging file.
+    //
+    // Note that "remove old file and link new file" is not acceptable, since it may end up with an intermediate (or
+    // permanent -- if the machine crashes) state where a potentially existing target file is gone without replacement.
+
+    // set up staging file
+    let staging_file = staging_file_name(file);
+    rustix::fs::linkat(file_fd, "", dir_fd, &staging_file, AtFlags::EMPTY_PATH)?;
+
+    // rename to target
+    let rename_res =
+        rustix::fs::renameat_with(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
+
+    match rename_res {
+        Ok(()) => {
+            // staging file is gone via rename, so we're good
+            Ok(())
+        }
+        Err(e) => {
+            // need to clean up staging file
+            rustix::fs::unlinkat(dir_fd, &staging_file, AtFlags::empty())?;
+
+            Err(e)
         }
     }
+}
+
+fn staging_file_name(filename: &str) -> String {
+    let uuid = Uuid::new_v4();
+
+    // NOTE: the prefix already contains a `.`, so we don't need yet another one
+    format!("{STAGING_FILE_PREFIX}{filename}.{uuid}")
 }

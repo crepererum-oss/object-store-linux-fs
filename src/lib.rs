@@ -19,14 +19,14 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
     error::IOErrorExt,
-    state::{OpenDirMode, State},
+    state::State,
     utils::{
-        link_at_replace, mode_create, rflags, rwflags, spawn_io, split_dirs_and_filename,
-        stat_to_meta,
+        OpenDirMode, link_at_replace, mode_create, rflags, rwflags, spawn_io,
+        split_dirs_and_filename, stat_to_meta,
     },
 };
 
-mod constants;
+pub mod constants;
 mod error;
 mod list;
 mod state;
@@ -80,7 +80,7 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location);
+        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Put)?;
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -144,7 +144,7 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location);
+        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Get)?;
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -216,7 +216,7 @@ impl ObjectStore for LinuxFS {
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let (dirs, file) = split_dirs_and_filename(location);
+        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Get)?;
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
@@ -277,7 +277,7 @@ impl ObjectStore for LinuxFS {
         Box::pin(locations.and_then(move |location| {
             let state = Arc::clone(&state);
             async move {
-                let (dirs, file) = split_dirs_and_filename(&location);
+                let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
                 let dir_fd = state.open_dir(dirs, OpenDirMode::Get).await?;
                 let file = file.to_owned();
                 let location = spawn_io(move || {
@@ -319,10 +319,10 @@ impl ObjectStore for LinuxFS {
             extensions: _,
         } = options;
 
-        let (from_dirs, from_file) = split_dirs_and_filename(from);
+        let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dirs, to_file) = split_dirs_and_filename(to);
+        let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
         let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
 
         let from_file = from_file.to_owned();
@@ -365,10 +365,10 @@ impl ObjectStore for LinuxFS {
             // ignore extensions
             extensions: _,
         } = options;
-        let (from_dirs, from_file) = split_dirs_and_filename(from);
+        let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
         let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dirs, to_file) = split_dirs_and_filename(to);
+        let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
         let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
 
         let from_file = from_file.to_owned();
