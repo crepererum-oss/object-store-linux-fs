@@ -71,7 +71,6 @@ async fn list_with_offset_exclusivity() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "not yet implemented")]
 async fn put_get_attributes() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
@@ -104,7 +103,6 @@ async fn rename_and_copy() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "not yet implemented")]
 async fn stream_get() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();

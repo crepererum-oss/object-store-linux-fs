@@ -1,9 +1,4 @@
-use std::{
-    io::{IoSlice, IoSliceMut},
-    ops::Range,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{io::IoSliceMut, ops::Range, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -12,23 +7,25 @@ use futures_util::TryStreamExt;
 use object_store::{
     CopyMode, CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult,
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions, RenameTargetMode, Result, UpdateVersion, path::Path,
+    PutResult, RenameOptions, RenameTargetMode, Result, UploadPart, path::Path,
 };
 use rustix::fs::{AtFlags, Mode};
 
 use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
     error::IOErrorExt,
+    put::{PreparedPutOperation, RunningPutOperation},
     state::State,
     utils::{
-        OpenDirMode, flock_dir, link_at_replace, mode_create_file, oflags_create, oflags_read,
-        rflags, rwflags, same_dir, spawn_io, split_dirs_and_filename, stat_to_meta,
+        OpenDirMode, flock_dir, link_at_replace, oflags_read, rflags, rwflags, same_dir, spawn_io,
+        split_dirs_and_filename, stat_to_meta,
     },
 };
 
 pub mod constants;
 mod error;
 mod list;
+mod put;
 mod state;
 mod utils;
 
@@ -59,105 +56,12 @@ impl ObjectStore for LinuxFS {
         payload: PutPayload,
         opts: PutOptions,
     ) -> Result<PutResult> {
-        let PutOptions {
-            mode,
-            // ignore tags
-            tags: _,
-            attributes,
-            // ignore extensions
-            extensions: _,
-        } = opts;
-        if !attributes.is_empty() {
-            return Err(Error::NotImplemented {
-                operation: "put_opts(attributes=<NOT_EMPTY>)".to_owned(),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-
-        let open_dir_mode = match &mode {
-            PutMode::Overwrite | PutMode::Create => OpenDirMode::Put,
-            PutMode::Update(_) => OpenDirMode::Update,
-        };
-        let (dirs, file) = split_dirs_and_filename(location, open_dir_mode)?;
-        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Put).await?;
-        let file = file.to_owned();
-        let location = location.clone();
+        let op = PreparedPutOperation::new(location, opts, &self.state).await?;
 
         let meta = spawn_io(move || {
-            let file_fd =
-                rustix::fs::openat2(&dir_fd, ".", oflags_create(), mode_create_file(), rflags())
-                    .into_other_err()?;
-
-            let mut slices = payload
-                .iter()
-                .map(|bytes| IoSlice::new(bytes))
-                .collect::<Vec<_>>();
-            let len = slices.iter().map(|s| s.len()).sum::<usize>();
-            let mut offset = 0;
-            while offset < len {
-                let written = rustix::io::pwritev2(&file_fd, &slices, offset as _, rwflags())
-                    .into_other_err()?;
-                offset += written;
-                IoSlice::advance_slices(&mut &mut slices[..], written);
-            }
-            rustix::fs::fsync(&file_fd).into_other_err()?;
-
-            let lock_fd = flock_dir(&dir_fd).into_other_err()?;
-
-            match mode {
-                PutMode::Overwrite => {
-                    link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
-                }
-                PutMode::Create => {
-                    rustix::fs::linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH)
-                        .into_put_err(&location)?;
-                }
-                PutMode::Update(UpdateVersion { e_tag, version }) => {
-                    let Some(e_tag) = e_tag else {
-                        return Err(Error::Precondition {
-                            path: location.to_string(),
-                            source: "need etag".to_owned().into(),
-                        });
-                    };
-                    if version.is_some() {
-                        return Err(Error::Precondition {
-                            path: location.to_string(),
-                            source: "versions are not used".to_owned().into(),
-                        });
-                    }
-
-                    let existing_fd =
-                        rustix::fs::openat2(&dir_fd, &file, oflags_read(), Mode::empty(), rflags())
-                            .into_update_err(&location)?;
-
-                    let existing_stat = rustix::fs::fstat(&existing_fd).into_get_err(&location)?;
-                    let existing_meta = stat_to_meta(existing_stat, location.clone())?;
-                    let existing_etag = existing_meta
-                        .e_tag
-                        .expect("fs implementation always provides etag");
-                    if existing_etag != e_tag {
-                        return Err(Error::Precondition {
-                            path: location.to_string(),
-                            source: format!(
-                                "requested etag='{}', got etag={}",
-                                e_tag, existing_etag,
-                            )
-                            .into(),
-                        });
-                    }
-
-                    link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
-                }
-            }
-            rustix::fs::fsync(&dir_fd).into_other_err()?;
-
-            let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
-            let meta = stat_to_meta(stat, location)?;
-
-            drop(file_fd);
-            drop(lock_fd);
-
-            Ok(meta)
+            let op = op.blocking_io_start()?;
+            op.blocking_io_put(payload, 0)?;
+            op.blocking_io_commit()
         })
         .await?;
 
@@ -170,10 +74,26 @@ impl ObjectStore for LinuxFS {
 
     async fn put_multipart_opts(
         &self,
-        _location: &Path,
-        _opts: PutMultipartOptions,
+        location: &Path,
+        opts: PutMultipartOptions,
     ) -> Result<Box<dyn MultipartUpload>> {
-        todo!()
+        let PutMultipartOptions {
+            tags,
+            attributes,
+            extensions,
+        } = opts;
+        let opts = PutOptions {
+            mode: PutMode::Overwrite,
+            tags,
+            attributes,
+            extensions,
+        };
+        let op = PreparedPutOperation::new(location, opts, &self.state).await?;
+        let op = spawn_io(move || op.blocking_io_start()).await?;
+        Ok(Box::new(LinuxFSUpload {
+            op: Some(Arc::new(op)),
+            offset: 0,
+        }))
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
@@ -467,6 +387,74 @@ impl ObjectStore for LinuxFS {
             rustix::fs::fsync(&to_dir_fd).into_other_err()?;
             rustix::fs::fsync(&from_dir_fd).into_other_err()?;
 
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[derive(Debug)]
+struct LinuxFSUpload {
+    op: Option<Arc<RunningPutOperation>>,
+    offset: usize,
+}
+
+impl LinuxFSUpload {
+    fn err_still_running() -> Error {
+        Error::Generic {
+            store: STORE_NAME,
+            source: "upload is still running".to_owned().into(),
+        }
+    }
+
+    fn err_not_running() -> Error {
+        Error::Generic {
+            store: STORE_NAME,
+            source: "upload no longer running".to_owned().into(),
+        }
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for LinuxFSUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let Some(op) = &self.op else {
+            return Box::pin(futures_util::future::ready(Err(Self::err_not_running())));
+        };
+        let op = Arc::clone(op);
+
+        let offset = self.offset;
+        self.offset += data.content_length();
+
+        Box::pin(spawn_io(move || {
+            op.blocking_io_put(data, offset)?;
+            Ok(())
+        }))
+    }
+
+    async fn complete(&mut self) -> Result<PutResult> {
+        let op = self.op.take().ok_or_else(Self::err_not_running)?;
+
+        let meta = spawn_io(move || {
+            let op = Arc::try_unwrap(op).map_err(|_| Self::err_still_running())?;
+            op.blocking_io_commit()
+        })
+        .await?;
+
+        Ok(PutResult {
+            e_tag: meta.e_tag,
+            version: None,
+            extensions: Default::default(),
+        })
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        let op = self.op.take().ok_or_else(Self::err_not_running)?;
+
+        // drop in I/O runtime
+        spawn_io(move || {
+            let op = Arc::try_unwrap(op).map_err(|_| Self::err_still_running())?;
+            drop(op);
             Ok(())
         })
         .await

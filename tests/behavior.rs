@@ -2,8 +2,9 @@
 
 use std::{assert_matches, os::unix::fs::PermissionsExt};
 
+use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use object_store::{Error, ObjectStore, ObjectStoreExt, path::Path};
+use object_store::{Error, MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use object_store_linux_fs::{LinuxFS, constants::STAGING_FILE_PREFIX};
 
 #[tokio::test]
@@ -35,6 +36,13 @@ async fn staging_file() {
     for path in &paths {
         println!("PUT: {path}");
         let err = storage.put(path, Default::default()).await.unwrap_err();
+        assert_matches!(err, Error::NotSupported { .. });
+    }
+
+    // PUT-multipart
+    for path in &paths {
+        println!("PUT-multipart: {path}");
+        let err = storage.put_multipart(path).await.unwrap_err();
         assert_matches!(err, Error::NotSupported { .. });
     }
 
@@ -151,4 +159,102 @@ fn assert_permission(actual: u32, expected: u32) {
         actual == expected,
         "actual:{actual:#o} != expected:{expected:#o}"
     )
+}
+
+#[tokio::test]
+async fn multipart_upload_small() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    let loc = Path::parse("x").unwrap();
+
+    let mut upload = storage.put_multipart(&loc).await.unwrap();
+    let fut1 = upload.put_part(PutPayload::from_static(b"foo"));
+    let fut2 = upload.put_part(PutPayload::from_static(b"baaar"));
+    let fut3 = upload.put_part(PutPayload::from_static(b"x"));
+    fut2.await.unwrap();
+    fut1.await.unwrap();
+    fut3.await.unwrap();
+    upload.complete().await.unwrap();
+
+    assert_eq!(
+        storage
+            .get(&loc)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"foobaaarx",
+    );
+}
+
+#[tokio::test]
+async fn multipart_upload_state_error() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    let loc = Path::parse("x").unwrap();
+
+    type OpFun = Box<
+        dyn for<'a> Fn(
+            &'a mut dyn MultipartUpload,
+        ) -> BoxFuture<'a, Result<(), object_store::Error>>,
+    >;
+    struct Op {
+        name: &'static str,
+        f: OpFun,
+        finishes: bool,
+    }
+
+    let ops = [
+        Op {
+            name: "put_part",
+            f: Box::new(|upload| Box::pin(async { upload.put_part(Default::default()).await })),
+            finishes: false,
+        },
+        Op {
+            name: "complete",
+            f: Box::new(|upload| Box::pin(async { upload.complete().await.map(|_| ()) })),
+            finishes: true,
+        },
+        Op {
+            name: "abort",
+            f: Box::new(|upload| Box::pin(async { upload.abort().await })),
+            finishes: true,
+        },
+    ];
+
+    for finish_op in &ops {
+        if !finish_op.finishes {
+            continue;
+        }
+
+        for after_op in &ops {
+            println!("{}.await => {}.await", finish_op.name, after_op.name);
+
+            let mut upload = storage.put_multipart(&loc).await.unwrap();
+            (finish_op.f)(&mut upload).await.unwrap();
+
+            assert_matches!(
+                (after_op.f)(&mut upload).await.unwrap_err(),
+                Error::Generic { .. },
+            );
+        }
+    }
+
+    for finish_op in &ops {
+        if !finish_op.finishes {
+            continue;
+        }
+
+        let mut upload = storage.put_multipart(&loc).await.unwrap();
+        let _f = upload.put_part(Default::default());
+
+        assert_matches!(
+            (finish_op.f)(&mut upload).await.unwrap_err(),
+            Error::Generic { .. },
+        );
+    }
 }
