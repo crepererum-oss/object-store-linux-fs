@@ -71,6 +71,8 @@ pub(crate) fn open_dir_fd(
 }
 
 pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
+    // TODO: this is somewhat a hack because `O_REGULAR` does not exist (yet), see
+    //       https://uapi-group.org/kernel-features/#ability-to-only-open-regular-files
     match FileType::from_raw_mode(stat.st_mode) {
         FileType::RegularFile => {}
         FileType::Directory => {
@@ -105,8 +107,8 @@ pub(crate) fn link_at_replace(
     dir_fd: &OwnedFd,
     file: &str,
 ) -> Result<(), rustix::io::Errno> {
-    // we cannot use `linkat` w/ replacement,
-    // see https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
+    // TODO: we cannot use `linkat` w/ replacement, see
+    //       https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
     loop {
         match rustix::fs::linkat(file_fd, "", dir_fd, file, AtFlags::EMPTY_PATH) {
             Ok(()) => {
