@@ -14,15 +14,15 @@ use object_store::{
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
     PutResult, RenameOptions, RenameTargetMode, Result, path::Path,
 };
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, Mode};
 
 use crate::{
     constants::{READ_BUFFER_SIZE, STORE_NAME},
     error::IOErrorExt,
     state::State,
     utils::{
-        OpenDirMode, link_at_replace, mode_create, rflags, rwflags, spawn_io,
-        split_dirs_and_filename, stat_to_meta,
+        OpenDirMode, link_at_replace, mode_create, oflags_create, oflags_read, rflags, rwflags,
+        spawn_io, split_dirs_and_filename, stat_to_meta,
     },
 };
 
@@ -86,14 +86,9 @@ impl ObjectStore for LinuxFS {
         let location = location.clone();
 
         let meta = spawn_io(move || {
-            let file_fd = rustix::fs::openat2(
-                &dir_fd,
-                ".",
-                OFlags::TMPFILE | OFlags::WRONLY,
-                mode_create(),
-                rflags(),
-            )
-            .into_other_err()?;
+            let file_fd =
+                rustix::fs::openat2(&dir_fd, ".", oflags_create(), mode_create(), rflags())
+                    .into_other_err()?;
 
             let mut slices = payload
                 .iter()
@@ -151,7 +146,7 @@ impl ObjectStore for LinuxFS {
 
         spawn_io(move || {
             let file_fd =
-                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
+                rustix::fs::openat2(&dir_fd, file, oflags_read(), Mode::empty(), rflags())
                     .into_get_err(&location)?;
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
@@ -224,7 +219,7 @@ impl ObjectStore for LinuxFS {
 
         spawn_io(move || {
             let file_fd =
-                rustix::fs::openat2(&dir_fd, file, OFlags::RDONLY, Mode::empty(), rflags())
+                rustix::fs::openat2(&dir_fd, file, oflags_read(), Mode::empty(), rflags())
                     .into_get_err(&location)?;
 
             let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
@@ -334,7 +329,7 @@ impl ObjectStore for LinuxFS {
             let file_fd = rustix::fs::openat2(
                 &from_dir_fd,
                 from_file,
-                OFlags::RDONLY,
+                oflags_read(),
                 Mode::empty(),
                 rflags(),
             )
@@ -380,7 +375,7 @@ impl ObjectStore for LinuxFS {
             let file_fd = rustix::fs::openat2(
                 &from_dir_fd,
                 &from_file,
-                OFlags::RDONLY,
+                oflags_read(),
                 Mode::empty(),
                 rflags(),
             )

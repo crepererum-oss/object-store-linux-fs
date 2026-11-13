@@ -13,12 +13,20 @@ use uuid::Uuid;
 
 use crate::constants::{STAGING_FILE_PREFIX, STORE_NAME};
 
-pub(crate) fn dir_oflags() -> OFlags {
-    OFlags::DIRECTORY | OFlags::NOFOLLOW
-}
-
 pub(crate) fn mode_create() -> Mode {
     Mode::RWXU | Mode::RWXG
+}
+
+pub(crate) fn oflags_create() -> OFlags {
+    OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::TMPFILE | OFlags::WRONLY
+}
+
+pub(crate) fn oflags_dir() -> OFlags {
+    OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
+}
+
+pub(crate) fn oflags_read() -> OFlags {
+    OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::RDONLY
 }
 
 pub(crate) fn rflags() -> ResolveFlags {
@@ -105,7 +113,7 @@ pub(crate) fn open_dir_fd(
     // TODO: introduce a read-only flag where we could skip this
     rustix::fs::fsync(parent)?;
 
-    let child_fd = rustix::fs::openat2(parent, child, dir_oflags(), Mode::empty(), rflags())?;
+    let child_fd = rustix::fs::openat2(parent, child, oflags_dir(), Mode::empty(), rflags())?;
     Ok(Arc::new(child_fd))
 }
 

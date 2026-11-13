@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     error::IOErrorExt,
-    utils::{OpenDirMode, dir_oflags, mode_create, open_dir_fd, spawn_io},
+    utils::{OpenDirMode, mode_create, oflags_dir, open_dir_fd, spawn_io},
 };
 
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub(crate) struct State {
 impl State {
     pub(crate) async fn new(root: PathBuf) -> Result<Self> {
         let (root, root_fd) = spawn_io(move || {
-            let root_fd = rustix::fs::open(&root, dir_oflags(), Mode::empty())
+            let root_fd = rustix::fs::open(&root, oflags_dir(), Mode::empty())
                 .into_get_err(root.display())?;
 
             Ok((root, root_fd))
