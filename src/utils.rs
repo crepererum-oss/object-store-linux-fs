@@ -39,6 +39,9 @@ pub(crate) fn oflags_read() -> OFlags {
 
 pub(crate) fn rflags() -> ResolveFlags {
     ResolveFlags::BENEATH
+        | ResolveFlags::NO_MAGICLINKS
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_XDEV
 }
 
 pub(crate) fn rwflags() -> ReadWriteFlags {
