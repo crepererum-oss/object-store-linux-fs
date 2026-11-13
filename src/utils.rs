@@ -223,7 +223,7 @@ pub(crate) fn flock_dir(dir_fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> 
 
     // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
     // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
-    let lock_fd = rustix::fs::openat(dir_fd, ".", oflags_read(), Mode::empty())?;
+    let lock_fd = rustix::fs::openat2(dir_fd, ".", oflags_read(), Mode::empty(), rflags())?;
     rustix::fs::flock(&lock_fd, FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)
