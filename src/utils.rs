@@ -13,8 +13,16 @@ use uuid::Uuid;
 
 use crate::constants::{STAGING_FILE_PREFIX, STORE_NAME};
 
-pub(crate) fn mode_create() -> Mode {
-    Mode::RWXU | Mode::RWXG
+/// Set `0o750` = `user=rwx + group=rx`
+///
+/// The `x` flag is required for directory traversal.
+pub(crate) fn mode_create_file() -> Mode {
+    Mode::RUSR | Mode::WUSR | Mode::RGRP
+}
+
+/// Set `0x640` = `user=rw + group=rw`.
+pub(crate) fn mode_create_dir() -> Mode {
+    Mode::RWXU | Mode::RGRP | Mode::XGRP
 }
 
 pub(crate) fn oflags_create() -> OFlags {

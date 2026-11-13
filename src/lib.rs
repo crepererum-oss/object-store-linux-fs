@@ -21,8 +21,8 @@ use crate::{
     error::IOErrorExt,
     state::State,
     utils::{
-        OpenDirMode, link_at_replace, mode_create, oflags_create, oflags_read, rflags, rwflags,
-        spawn_io, split_dirs_and_filename, stat_to_meta,
+        OpenDirMode, link_at_replace, mode_create_file, oflags_create, oflags_read, rflags,
+        rwflags, spawn_io, split_dirs_and_filename, stat_to_meta,
     },
 };
 
@@ -87,7 +87,7 @@ impl ObjectStore for LinuxFS {
 
         let meta = spawn_io(move || {
             let file_fd =
-                rustix::fs::openat2(&dir_fd, ".", oflags_create(), mode_create(), rflags())
+                rustix::fs::openat2(&dir_fd, ".", oflags_create(), mode_create_file(), rflags())
                     .into_other_err()?;
 
             let mut slices = payload

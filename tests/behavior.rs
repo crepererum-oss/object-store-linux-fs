@@ -1,6 +1,6 @@
 //! Implementation-specific behavior tests.
 
-use std::assert_matches;
+use std::{assert_matches, os::unix::fs::PermissionsExt};
 
 use futures_util::TryStreamExt;
 use object_store::{Error, ObjectStore, ObjectStoreExt, path::Path};
@@ -115,4 +115,40 @@ async fn staging_file() {
         list_res.common_prefixes,
         vec![Path::parse("sub").unwrap(), Path::parse("sub2").unwrap()],
     );
+}
+
+#[tokio::test]
+async fn permissions() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    storage
+        .put(&Path::parse("sub/file").unwrap(), Default::default())
+        .await
+        .unwrap();
+
+    assert_permission(
+        std::fs::metadata(path.path().join("sub"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        0o750,
+    );
+
+    assert_permission(
+        std::fs::metadata(path.path().join("sub").join("file"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        0o640,
+    );
+}
+
+#[track_caller]
+fn assert_permission(actual: u32, expected: u32) {
+    let actual = actual & 0o777;
+    assert!(
+        actual == expected,
+        "actual:{actual:#o} != expected:{expected:#o}"
+    )
 }

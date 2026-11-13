@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     error::IOErrorExt,
-    utils::{OpenDirMode, mode_create, oflags_dir, open_dir_fd, spawn_io},
+    utils::{OpenDirMode, mode_create_dir, oflags_dir, open_dir_fd, spawn_io},
 };
 
 #[derive(Debug)]
@@ -59,7 +59,7 @@ impl State {
                     (sub_fd, prefix) = spawn_io(move || {
                         if mode == OpenDirMode::Put {
                             // try to create dir
-                            match rustix::fs::mkdirat(&dir_fd, &part, mode_create()) {
+                            match rustix::fs::mkdirat(&dir_fd, &part, mode_create_dir()) {
                                 Ok(()) => {}
                                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                                     // race
