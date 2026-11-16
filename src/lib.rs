@@ -13,7 +13,7 @@ use rustix::fs::{AtFlags, Mode};
 
 use crate::{
     attributes::read_attrs_from_fd,
-    constants::{OFLAGS_READ, READ_BUFFER_SIZE, READ_WRITE_FLAGS, RESOLVE_FLAGS, STORE_NAME},
+    constants::{OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS, STORE_NAME},
     error::IOErrorExt,
     put::{PreparedPutOperation, RunningPutOperation},
     state::State,
@@ -23,10 +23,13 @@ use crate::{
     },
 };
 
+pub use options::LinuxFSOptions;
+
 mod attributes;
 pub mod constants;
 mod error;
 mod list;
+mod options;
 mod put;
 mod state;
 mod utils;
@@ -37,9 +40,9 @@ pub struct LinuxFS {
 }
 
 impl LinuxFS {
-    pub async fn new(root: PathBuf) -> Result<Self> {
+    pub async fn new(root: PathBuf, options: LinuxFSOptions) -> Result<Self> {
         Ok(Self {
-            state: Arc::new(State::new(root).await?),
+            state: Arc::new(State::new(root, options).await?),
         })
     }
 }
@@ -110,6 +113,7 @@ impl ObjectStore for LinuxFS {
         let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
         let file = file.to_owned();
         let location = location.clone();
+        let read_buffer_size = self.state.options().read_buffer_size.get();
 
         spawn_io(move || {
             let file_fd =
@@ -134,7 +138,7 @@ impl ObjectStore for LinuxFS {
             let stream = if options.head || range.is_empty() {
                 Box::pin(futures_util::stream::empty()) as BoxStream<'static, Result<Bytes>>
             } else {
-                let buf = vec![0; READ_BUFFER_SIZE];
+                let buf = vec![0; read_buffer_size];
                 Box::pin(futures_util::stream::try_unfold(
                     (file_fd, buf, range.start as usize, range.end as usize),
                     move |(file_fd, mut buf, offset, range_end)| {

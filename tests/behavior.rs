@@ -8,14 +8,17 @@ use object_store::{
     Attribute, AttributeValue, Attributes, Error, MultipartUpload, ObjectStore, ObjectStoreExt,
     PutOptions, PutPayload, path::Path,
 };
-use object_store_linux_fs::{LinuxFS, constants::STAGING_FILE_PREFIX};
+use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
 
 #[tokio::test]
 async fn store_does_not_autocreate_root() {
     let path = tempfile::tempdir().unwrap();
-    let err = LinuxFS::new(path.path().join("sub").to_path_buf())
-        .await
-        .unwrap_err();
+    let err = LinuxFS::new(
+        path.path().join("sub").to_path_buf(),
+        LinuxFSOptions::default(),
+    )
+    .await
+    .unwrap_err();
     assert_matches!(err, Error::NotFound { .. });
 }
 
@@ -31,9 +34,12 @@ async fn staging_file() {
     ];
 
     let storeage_path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(storeage_path.path().to_path_buf())
-        .await
-        .unwrap();
+    let storage = LinuxFS::new(
+        storeage_path.path().to_path_buf(),
+        LinuxFSOptions::default(),
+    )
+    .await
+    .unwrap();
 
     // PUT
     for path in &paths {
@@ -131,7 +137,9 @@ async fn staging_file() {
 #[tokio::test]
 async fn permissions() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     storage
         .put(&Path::parse("sub/file").unwrap(), Default::default())
@@ -167,7 +175,9 @@ fn assert_permission(actual: u32, expected: u32) {
 #[tokio::test]
 async fn multipart_upload_small() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     let loc = Path::parse("x").unwrap();
 
@@ -196,7 +206,9 @@ async fn multipart_upload_small() {
 #[tokio::test]
 async fn multipart_upload_state_error() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     let loc = Path::parse("x").unwrap();
 
@@ -268,7 +280,9 @@ async fn broken_attributes() {
     const VFS_LIMIT_VALUE: usize = 65_536;
 
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     let loc = Path::parse("x").unwrap();
 
@@ -328,7 +342,9 @@ fn long_string(len: usize) -> String {
 #[tokio::test]
 async fn weird_attributes() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     let loc = Path::parse("x").unwrap();
     let attrs = Attributes::from_iter([(
@@ -360,7 +376,9 @@ async fn list_state() {
         println!("prefix: {prefix}");
 
         let path = tempfile::tempdir().unwrap();
-        let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+        let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+            .await
+            .unwrap();
 
         let mut files = (0..N_FILES)
             .map(|idx| Path::parse(format!("{prefix}{idx}")).unwrap())

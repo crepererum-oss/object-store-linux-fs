@@ -60,9 +60,6 @@ pub(crate) const OFLAGS_READ: OFlags = OFlags::CLOEXEC
     .union(OFlags::NOFOLLOW)
     .union(OFlags::RDONLY);
 
-/// Read buffer size for GET requests.
-pub const READ_BUFFER_SIZE: usize = 4096;
-
 /// [`ReadWriteFlags`] used for [`preadv2`]/[`pwritev2`]
 ///
 /// This is currently empty.

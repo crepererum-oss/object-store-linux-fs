@@ -1,14 +1,16 @@
 //! Upstream integration tests.
 
 use object_store::path::Path;
-use object_store_linux_fs::LinuxFS;
+use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
 const NON_EXISTENT_NAME: &str = "nonexistentname";
 
 #[tokio::test]
 async fn copy_if_not_exists() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::copy_if_not_exists(&storage).await;
 }
@@ -16,7 +18,9 @@ async fn copy_if_not_exists() {
 #[tokio::test]
 async fn copy_rename_nonexistent_object() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::copy_rename_nonexistent_object(&storage).await;
 }
@@ -24,7 +28,9 @@ async fn copy_rename_nonexistent_object() {
 #[tokio::test]
 async fn get_nonexistent_object() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     let location = Path::from(NON_EXISTENT_NAME);
 
@@ -41,7 +47,9 @@ async fn get_nonexistent_object() {
 #[tokio::test]
 async fn get_opts() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::get_opts(&storage).await;
 }
@@ -49,7 +57,9 @@ async fn get_opts() {
 #[tokio::test]
 async fn list_uses_directories_correctly() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::list_uses_directories_correctly(&storage).await;
 }
@@ -57,7 +67,9 @@ async fn list_uses_directories_correctly() {
 #[tokio::test]
 async fn list_with_delimiter() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::list_with_delimiter(&storage).await;
 }
@@ -65,7 +77,9 @@ async fn list_with_delimiter() {
 #[tokio::test]
 async fn list_with_offset_exclusivity() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::list_with_offset_exclusivity(&storage).await;
 }
@@ -73,7 +87,9 @@ async fn list_with_offset_exclusivity() {
 #[tokio::test]
 async fn put_get_attributes() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::put_get_attributes(&storage).await;
 }
@@ -81,7 +97,9 @@ async fn put_get_attributes() {
 #[tokio::test]
 async fn put_get_delete_list() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::put_get_delete_list(&storage).await;
 }
@@ -89,7 +107,9 @@ async fn put_get_delete_list() {
 #[tokio::test]
 async fn put_opts() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::put_opts(&storage, true).await;
 }
@@ -97,7 +117,9 @@ async fn put_opts() {
 #[tokio::test]
 async fn rename_and_copy() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::rename_and_copy(&storage).await;
 }
@@ -105,7 +127,9 @@ async fn rename_and_copy() {
 #[tokio::test]
 async fn stream_get() {
     let path = tempfile::tempdir().unwrap();
-    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
 
     object_store::integration::stream_get(&storage).await;
 }

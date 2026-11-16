@@ -11,6 +11,7 @@ use rustix::fs::Mode;
 use tokio::sync::Mutex;
 
 use crate::{
+    LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
     utils::{OpenDirMode, open_dir_fd, spawn_io},
@@ -20,10 +21,11 @@ use crate::{
 pub(crate) struct State {
     root: PathBuf,
     dir_fd_cache: Mutex<HashMap<PathBuf, Arc<OwnedFd>>>,
+    options: LinuxFSOptions,
 }
 
 impl State {
-    pub(crate) async fn new(root: PathBuf) -> Result<Self> {
+    pub(crate) async fn new(root: PathBuf, options: LinuxFSOptions) -> Result<Self> {
         let (root, root_fd) = spawn_io(move || {
             let root_fd =
                 rustix::fs::open(&root, OFLAGS_DIR, Mode::empty()).into_get_err(root.display())?;
@@ -35,6 +37,7 @@ impl State {
         Ok(Self {
             root: root.clone(),
             dir_fd_cache: Mutex::new(HashMap::from([(root, Arc::new(root_fd))])),
+            options,
         })
     }
 
@@ -91,5 +94,9 @@ impl State {
 
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    pub(crate) fn options(&self) -> &LinuxFSOptions {
+        &self.options
     }
 }
