@@ -4,7 +4,10 @@ use std::{assert_matches, os::unix::fs::PermissionsExt};
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use object_store::{Error, MultipartUpload, ObjectStore, ObjectStoreExt, PutPayload, path::Path};
+use object_store::{
+    Attribute, AttributeValue, Attributes, Error, MultipartUpload, ObjectStore, ObjectStoreExt,
+    PutOptions, PutPayload, path::Path,
+};
 use object_store_linux_fs::{LinuxFS, constants::STAGING_FILE_PREFIX};
 
 #[tokio::test]
@@ -257,4 +260,94 @@ async fn multipart_upload_state_error() {
             Error::Generic { .. },
         );
     }
+}
+
+#[tokio::test]
+async fn broken_attributes() {
+    const VFS_LIMIT_NAME: usize = 255;
+    const VFS_LIMIT_VALUE: usize = 65_536;
+
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    let loc = Path::parse("x").unwrap();
+
+    let err = storage
+        .put_opts(
+            &loc,
+            Default::default(),
+            PutOptions {
+                attributes: Attributes::from_iter([(
+                    Attribute::Metadata("".into()),
+                    AttributeValue::from("x".to_owned()),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::Generic { .. });
+
+    let err = storage
+        .put_opts(
+            &loc,
+            Default::default(),
+            PutOptions {
+                attributes: Attributes::from_iter([(
+                    Attribute::Metadata(long_string(VFS_LIMIT_NAME + 1).into()),
+                    AttributeValue::from("x".to_owned()),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::Generic { .. });
+
+    let err = storage
+        .put_opts(
+            &loc,
+            Default::default(),
+            PutOptions {
+                attributes: Attributes::from_iter([(
+                    Attribute::Metadata("x".into()),
+                    AttributeValue::from(long_string(VFS_LIMIT_VALUE + 1)),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::Generic { .. });
+}
+
+fn long_string(len: usize) -> String {
+    std::iter::repeat_n('a', len).collect()
+}
+
+#[tokio::test]
+async fn weird_attributes() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+    let loc = Path::parse("x").unwrap();
+    let attrs = Attributes::from_iter([(
+        Attribute::Metadata("x".into()),
+        AttributeValue::from("".to_owned()),
+    )]);
+
+    storage
+        .put_opts(
+            &loc,
+            Default::default(),
+            PutOptions {
+                attributes: attrs.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let get_res = storage.get(&loc).await.unwrap();
+    assert_eq!(get_res.attributes, attrs);
 }

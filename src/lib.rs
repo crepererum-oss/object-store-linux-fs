@@ -12,6 +12,7 @@ use object_store::{
 use rustix::fs::{AtFlags, Mode};
 
 use crate::{
+    attributes::read_attrs_from_fd,
     constants::{OFLAGS_READ, READ_BUFFER_SIZE, READ_WRITE_FLAGS, RESOLVE_FLAGS, STORE_NAME},
     error::IOErrorExt,
     put::{PreparedPutOperation, RunningPutOperation},
@@ -22,6 +23,7 @@ use crate::{
     },
 };
 
+mod attributes;
 pub mod constants;
 mod error;
 mod list;
@@ -118,6 +120,8 @@ impl ObjectStore for LinuxFS {
             let meta = stat_to_meta(stat, location.clone())?;
             options.check_preconditions(&meta)?;
 
+            let attributes = read_attrs_from_fd(&file_fd).into_get_err(&location)?;
+
             let range = match options.range {
                 None => 0..meta.size,
                 Some(range) => range.as_range(meta.size).map_err(|e| Error::Generic {
@@ -168,7 +172,7 @@ impl ObjectStore for LinuxFS {
                 payload: GetResultPayload::Stream(stream),
                 meta,
                 range,
-                attributes: Default::default(),
+                attributes,
                 extensions: Default::default(),
             })
         })

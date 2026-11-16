@@ -1,14 +1,15 @@
 use std::{io::IoSlice, os::fd::OwnedFd, sync::Arc};
 
 use object_store::{
-    Error, ObjectMeta, PutMode, PutOptions, PutPayload, Result, UpdateVersion, path::Path,
+    Attributes, Error, ObjectMeta, PutMode, PutOptions, PutPayload, Result, UpdateVersion,
+    path::Path,
 };
-use rustix::fs::{AtFlags, Mode};
+use rustix::fs::{AtFlags, Mode, XattrFlags};
 
 use crate::{
+    attributes::attr_to_xattr,
     constants::{
         MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
-        STORE_NAME,
     },
     error::IOErrorExt,
     state::State,
@@ -20,6 +21,7 @@ pub(crate) struct PreparedPutOperation {
     file: String,
     dir_fd: Arc<OwnedFd>,
     mode: PutMode,
+    attributes: Attributes,
 }
 
 impl PreparedPutOperation {
@@ -32,12 +34,6 @@ impl PreparedPutOperation {
             // ignore extensions
             extensions: _,
         } = opts;
-        if !attributes.is_empty() {
-            return Err(Error::NotImplemented {
-                operation: "put_opts(attributes=<NOT_EMPTY>)".to_owned(),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
 
         let open_dir_mode = match &mode {
             PutMode::Overwrite | PutMode::Create => OpenDirMode::Put,
@@ -51,6 +47,7 @@ impl PreparedPutOperation {
             file: file.to_owned(),
             dir_fd,
             mode,
+            attributes,
         })
     }
 
@@ -60,6 +57,7 @@ impl PreparedPutOperation {
             file,
             dir_fd,
             mode,
+            attributes,
         } = self;
 
         let file_fd = rustix::fs::openat2(
@@ -70,6 +68,16 @@ impl PreparedPutOperation {
             RESOLVE_FLAGS,
         )
         .into_other_err()?;
+
+        for (attr, attr_val) in attributes.iter() {
+            rustix::fs::fsetxattr(
+                &file_fd,
+                attr_to_xattr(attr)?,
+                attr_val.as_bytes(),
+                XattrFlags::CREATE,
+            )
+            .into_other_err()?;
+        }
 
         Ok(RunningPutOperation {
             file_fd,
