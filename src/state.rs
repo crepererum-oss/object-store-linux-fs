@@ -14,7 +14,8 @@ use crate::{
     LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    utils::{OpenDirMode, open_dir_fd, spawn_io},
+    io::spawn_io,
+    utils::{OpenDirMode, open_dir_fd},
 };
 
 #[derive(Debug)]
@@ -26,9 +27,10 @@ pub(crate) struct State {
 
 impl State {
     pub(crate) async fn new(root: PathBuf, options: LinuxFSOptions) -> Result<Self> {
-        let (root, root_fd) = spawn_io(move || {
-            let root_fd =
-                rustix::fs::open(&root, OFLAGS_DIR, Mode::empty()).into_get_err(root.display())?;
+        let (root, root_fd) = spawn_io(&options.io_layer, move |io| {
+            let root_fd = io
+                .open(&root, OFLAGS_DIR, Mode::empty())
+                .into_get_err(root.display())?;
 
             Ok((root, root_fd))
         })
@@ -60,10 +62,10 @@ impl State {
                 Entry::Vacant(v) => {
                     let part = part.to_owned();
                     let sub_fd;
-                    (sub_fd, prefix) = spawn_io(move || {
+                    (sub_fd, prefix) = spawn_io(&self.options.io_layer, move |io| {
                         if mode == OpenDirMode::Put {
                             // try to create dir
-                            match rustix::fs::mkdirat(&dir_fd, &part, MODE_DIR_CREATE) {
+                            match io.mkdirat(&dir_fd, &part, MODE_DIR_CREATE) {
                                 Ok(()) => {}
                                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                                     // race
@@ -74,7 +76,7 @@ impl State {
                             }
                         }
 
-                        let sub_fd_res = open_dir_fd(&dir_fd, &part);
+                        let sub_fd_res = open_dir_fd(io, &dir_fd, &part);
                         let sub_fd = match mode {
                             OpenDirMode::Get => sub_fd_res.into_get_err(&prefix)?,
                             OpenDirMode::Put => sub_fd_res.into_other_err()?,

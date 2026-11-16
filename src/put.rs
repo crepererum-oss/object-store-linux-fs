@@ -12,6 +12,7 @@ use crate::{
         MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
     },
     error::IOErrorExt,
+    io::IOBlock,
     state::State,
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
@@ -51,7 +52,7 @@ impl PreparedPutOperation {
         })
     }
 
-    pub(crate) fn blocking_io_start(self) -> Result<RunningPutOperation> {
+    pub(crate) fn blocking_io_start(self, io: &mut dyn IOBlock) -> Result<RunningPutOperation> {
         let Self {
             location,
             file,
@@ -60,19 +61,20 @@ impl PreparedPutOperation {
             attributes,
         } = self;
 
-        let file_fd = rustix::fs::openat2(
-            &dir_fd,
-            ".",
-            OFLAGS_FILE_CREATE,
-            MODE_FILE_CREATE,
-            RESOLVE_FLAGS,
-        )
-        .into_other_err()?;
+        let file_fd = io
+            .openat2(
+                &dir_fd,
+                ".",
+                OFLAGS_FILE_CREATE,
+                MODE_FILE_CREATE,
+                RESOLVE_FLAGS,
+            )
+            .into_other_err()?;
 
         for (attr, attr_val) in attributes.iter() {
-            rustix::fs::fsetxattr(
+            io.fsetxattr(
                 &file_fd,
-                attr_to_xattr(attr)?,
+                &attr_to_xattr(attr)?,
                 attr_val.as_bytes(),
                 XattrFlags::CREATE,
             )
@@ -99,7 +101,12 @@ pub(crate) struct RunningPutOperation {
 }
 
 impl RunningPutOperation {
-    pub(crate) fn blocking_io_put(&self, payload: PutPayload, start_offset: usize) -> Result<()> {
+    pub(crate) fn blocking_io_put(
+        &self,
+        io: &mut dyn IOBlock,
+        payload: PutPayload,
+        start_offset: usize,
+    ) -> Result<()> {
         let Self { file_fd, .. } = self;
 
         let mut slices = payload
@@ -109,7 +116,8 @@ impl RunningPutOperation {
         let len = slices.iter().map(|s| s.len()).sum::<usize>();
         let mut offset = start_offset;
         while offset < start_offset + len {
-            let written = rustix::io::pwritev2(file_fd, &slices, offset as _, READ_WRITE_FLAGS)
+            let written = io
+                .pwritev2(file_fd, &slices, offset as _, READ_WRITE_FLAGS)
                 .into_other_err()?;
             offset += written;
             IoSlice::advance_slices(&mut &mut slices[..], written);
@@ -118,7 +126,7 @@ impl RunningPutOperation {
         Ok(())
     }
 
-    pub(crate) fn blocking_io_commit(self) -> Result<ObjectMeta> {
+    pub(crate) fn blocking_io_commit(self, io: &mut dyn IOBlock) -> Result<ObjectMeta> {
         let Self {
             file_fd,
             dir_fd,
@@ -127,16 +135,16 @@ impl RunningPutOperation {
             mode,
         } = self;
 
-        rustix::fs::fsync(&file_fd).into_other_err()?;
+        io.fsync(&file_fd).into_other_err()?;
 
-        let lock_fd = flock_dir(&dir_fd).into_other_err()?;
+        let lock_fd = flock_dir(io, &dir_fd).into_other_err()?;
 
         match mode {
             PutMode::Overwrite => {
-                link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
+                link_at_replace(io, &file_fd, &dir_fd, &file).into_other_err()?;
             }
             PutMode::Create => {
-                rustix::fs::linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH)
+                io.linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH)
                     .into_put_err(&location)?;
             }
             PutMode::Update(UpdateVersion { e_tag, version }) => {
@@ -153,11 +161,11 @@ impl RunningPutOperation {
                     });
                 }
 
-                let existing_fd =
-                    rustix::fs::openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
-                        .into_update_err(&location)?;
+                let existing_fd = io
+                    .openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                    .into_update_err(&location)?;
 
-                let existing_stat = rustix::fs::fstat(&existing_fd).into_get_err(&location)?;
+                let existing_stat = io.fstat(&existing_fd).into_get_err(&location)?;
                 let existing_meta = stat_to_meta(existing_stat, location.clone())?;
                 let existing_etag = existing_meta
                     .e_tag
@@ -170,12 +178,12 @@ impl RunningPutOperation {
                     });
                 }
 
-                link_at_replace(&file_fd, &dir_fd, &file).into_other_err()?;
+                link_at_replace(io, &file_fd, &dir_fd, &file).into_other_err()?;
             }
         }
-        rustix::fs::fsync(&dir_fd).into_other_err()?;
+        io.fsync(&dir_fd).into_other_err()?;
 
-        let stat = rustix::fs::fstat(&file_fd).into_get_err(&location)?;
+        let stat = io.fstat(&file_fd).into_get_err(&location)?;
         let meta = stat_to_meta(stat, location)?;
 
         drop(file_fd);

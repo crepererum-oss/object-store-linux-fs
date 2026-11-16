@@ -6,26 +6,11 @@ use object_store::{
     path::{DELIMITER_CHAR, Path},
 };
 use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, RenameFlags, Stat};
-use uuid::Uuid;
 
-use crate::constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME};
-
-pub(crate) async fn spawn_io<F, R>(f: F) -> Result<R>
-where
-    F: FnOnce() -> Result<R> + Send + 'static,
-    R: Send + 'static,
-{
-    tokio::task::spawn_blocking(f).await.map_err(|e| {
-        if e.is_panic() {
-            std::panic::resume_unwind(e.into_panic())
-        } else {
-            Error::Generic {
-                store: STORE_NAME,
-                source: Box::new(e),
-            }
-        }
-    })?
-}
+use crate::{
+    constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME},
+    io::IOBlock,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenDirMode {
@@ -85,14 +70,15 @@ fn split_dirs_and_filename_str(location: &Path) -> (Option<&str>, &str) {
 }
 
 pub(crate) fn open_dir_fd(
+    io: &mut dyn IOBlock,
     parent: &OwnedFd,
     child: &str,
 ) -> Result<Arc<OwnedFd>, rustix::io::Errno> {
     // we still need to fsync because the creating thread/process might die before that
     // TODO: introduce a read-only flag where we could skip this
-    rustix::fs::fsync(parent)?;
+    io.fsync(parent)?;
 
-    let child_fd = rustix::fs::openat2(parent, child, OFLAGS_DIR, Mode::empty(), RESOLVE_FLAGS)?;
+    let child_fd = io.openat2(parent, child, OFLAGS_DIR, Mode::empty(), RESOLVE_FLAGS)?;
     Ok(Arc::new(child_fd))
 }
 
@@ -129,6 +115,7 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
 }
 
 pub(crate) fn link_at_replace(
+    io: &mut dyn IOBlock,
     file_fd: &OwnedFd,
     dir_fd: &OwnedFd,
     file: &str,
@@ -143,12 +130,11 @@ pub(crate) fn link_at_replace(
     // permanent -- if the machine crashes) state where a potentially existing target file is gone without replacement.
 
     // set up staging file
-    let staging_file = staging_file_name(file);
-    rustix::fs::linkat(file_fd, "", dir_fd, &staging_file, AtFlags::EMPTY_PATH)?;
+    let staging_file = staging_file_name(io, file);
+    io.linkat(file_fd, "", dir_fd, &staging_file, AtFlags::EMPTY_PATH)?;
 
     // rename to target
-    let rename_res =
-        rustix::fs::renameat_with(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
+    let rename_res = io.renameat2(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
 
     match rename_res {
         Ok(()) => {
@@ -157,21 +143,24 @@ pub(crate) fn link_at_replace(
         }
         Err(e) => {
             // need to clean up staging file
-            rustix::fs::unlinkat(dir_fd, &staging_file, AtFlags::empty())?;
+            io.unlinkat(dir_fd, &staging_file, AtFlags::empty())?;
 
             Err(e)
         }
     }
 }
 
-fn staging_file_name(filename: &str) -> String {
-    let uuid = Uuid::new_v4();
+fn staging_file_name(io: &mut dyn IOBlock, filename: &str) -> String {
+    let uuid = io.uuid();
 
     // NOTE: the prefix already contains a `.`, so we don't need yet another one
     format!("{STAGING_FILE_PREFIX}{filename}.{uuid}")
 }
 
-pub(crate) fn flock_dir(dir_fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
+pub(crate) fn flock_dir(
+    io: &mut dyn IOBlock,
+    dir_fd: &OwnedFd,
+) -> Result<OwnedFd, rustix::io::Errno> {
     // TODO: There is no way to replace-override with a file descriptor. Hence we need to use
     //       directory-based locking to ensure the file doesn't change while we're at it. This is
     //       somewhat similar (but not identical) to:
@@ -181,8 +170,8 @@ pub(crate) fn flock_dir(dir_fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> 
 
     // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
     // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
-    let lock_fd = rustix::fs::openat2(dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)?;
-    rustix::fs::flock(&lock_fd, FlockOperation::LockExclusive)?;
+    let lock_fd = io.openat2(dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)?;
+    io.flock(&lock_fd, FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)
 }

@@ -3,7 +3,7 @@ use std::{mem::MaybeUninit, os::fd::OwnedFd};
 use object_store::{Attribute, Attributes, Error, Result};
 use rustix::io::Errno;
 
-use crate::constants::STORE_NAME;
+use crate::{constants::STORE_NAME, io::IOBlock};
 
 pub(crate) fn attr_to_xattr(attr: &Attribute) -> Result<String> {
     let name = match attr {
@@ -47,10 +47,10 @@ fn xattr_to_attr(attr: &str) -> Option<Attribute> {
     }
 }
 
-pub(crate) fn read_attrs_from_fd(fd: &OwnedFd) -> Result<Attributes, Errno> {
-    let names_len = rustix::fs::flistxattr_query(fd)?;
+pub(crate) fn read_attrs_from_fd(io: &mut dyn IOBlock, fd: &OwnedFd) -> Result<Attributes, Errno> {
+    let names_len = io.flistxattr_query(fd)?;
     let mut buffer_names = vec![MaybeUninit::uninit(); names_len];
-    let (init, _uinit) = rustix::fs::flistxattr(fd, &mut buffer_names)?;
+    let (init, _uinit) = io.flistxattr(fd, &mut buffer_names)?;
     let names = std::str::from_utf8(init).map_err(|_| Errno::INVAL)?;
 
     let mut attributes = Attributes::with_capacity(names.chars().filter(|c| *c == '\0').count());
@@ -61,11 +61,11 @@ pub(crate) fn read_attrs_from_fd(fd: &OwnedFd) -> Result<Attributes, Errno> {
             continue;
         };
 
-        let attr_len = rustix::fs::fgetxattr_query(fd, name.as_bytes())?;
+        let attr_len = io.fgetxattr_query(fd, name)?;
         if buffer_values.len() < attr_len {
             buffer_values.resize(attr_len, MaybeUninit::uninit());
         }
-        let (init, _uninit) = rustix::fs::fgetxattr(fd, name.as_bytes(), &mut buffer_values)?;
+        let (init, _uninit) = io.fgetxattr(fd, name, &mut buffer_values)?;
         let value = String::from_utf8(init.to_vec()).map_err(|_| Errno::INVAL)?;
         attributes.insert(attr, value.into());
     }

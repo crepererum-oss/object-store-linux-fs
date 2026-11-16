@@ -13,8 +13,9 @@ use crate::{
         GETDENTS_BUFFER_SIZE, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
+    io::spawn_io,
     state::State,
-    utils::{OpenDirMode, open_dir_fd, spawn_io, stat_to_meta},
+    utils::{OpenDirMode, open_dir_fd, stat_to_meta},
 };
 
 pub(crate) fn list(
@@ -194,19 +195,14 @@ impl NextTask {
                     return Ok(None);
                 };
 
-                let maybe_opened = spawn_io(move || {
+                let maybe_opened = spawn_io(&state.options().io_layer, move |io| {
                     let (prefix, dir_fd) = match dir_fd {
                         DirFd::Eager { prefix, dir_fd } => {
                             // "list" FD has state, hence we need to re-open the directory
-                            let Some(dir_fd) = rustix::fs::openat2(
-                                &dir_fd,
-                                ".",
-                                OFLAGS_READ,
-                                Mode::empty(),
-                                RESOLVE_FLAGS,
-                            )
-                            .into_list_err()
-                            .transpose()?
+                            let Some(dir_fd) = io
+                                .openat2(&dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                                .into_list_err()
+                                .transpose()?
                             else {
                                 return Ok(None);
                             };
@@ -217,8 +213,9 @@ impl NextTask {
                             parent,
                             child,
                         } => {
-                            let Some(dir_fd) =
-                                open_dir_fd(&parent, &child).into_list_err().transpose()?
+                            let Some(dir_fd) = open_dir_fd(io, &parent, &child)
+                                .into_list_err()
+                                .transpose()?
                             else {
                                 return Ok(None);
                             };
@@ -258,14 +255,16 @@ impl NextTask {
                 prefix,
                 state,
             } => {
-                let (mut dir_fd, getdents_buffer, entries) = spawn_io(move || {
-                    let entries = getdents(&dir_fd, &mut getdents_buffer)
-                        .into_list_err()
-                        .transpose()?
-                        .unwrap_or_default();
-                    Ok((dir_fd, getdents_buffer, entries))
-                })
-                .await?;
+                let (mut dir_fd, getdents_buffer, entries) =
+                    spawn_io(&state.options().io_layer, move |io| {
+                        let entries = io
+                            .getdents(&dir_fd, &mut getdents_buffer)
+                            .into_list_err()
+                            .transpose()?
+                            .unwrap_or_default();
+                        Ok((dir_fd, getdents_buffer, entries))
+                    })
+                    .await?;
 
                 if entries.is_empty() {
                     // end of directory
@@ -305,14 +304,15 @@ impl NextTask {
                         match file_type {
                             FileType::RegularFile => {
                                 let maybe_stat;
-                                (dir_fd, maybe_stat) = spawn_io(move || {
-                                    let maybe_stat =
-                                        rustix::fs::statat(&dir_fd, &file_name, AtFlags::empty())
+                                (dir_fd, maybe_stat) =
+                                    spawn_io(&state.options().io_layer, move |io| {
+                                        let maybe_stat = io
+                                            .statat(&dir_fd, &file_name, AtFlags::empty())
                                             .into_list_err()
                                             .transpose()?;
-                                    Ok((dir_fd, maybe_stat))
-                                })
-                                .await?;
+                                        Ok((dir_fd, maybe_stat))
+                                    })
+                                    .await?;
 
                                 if let Some(meta) = maybe_stat
                                     .map(|stat| stat_to_meta(stat, child_path))
@@ -351,56 +351,4 @@ impl NextTask {
             }
         }
     }
-}
-
-fn getdents(
-    fd: &OwnedFd,
-    buf: &mut Vec<MaybeUninit<u8>>,
-) -> Result<Vec<(String, FileType)>, rustix::io::Errno> {
-    let mut entries = vec![];
-
-    let mut dir = loop {
-        let mut dir = rustix::fs::RawDir::new(fd, buf);
-
-        match dir.next() {
-            None => {
-                // no entries left
-                return Ok(entries);
-            }
-            Some(Ok(first_entry)) => {
-                // buffer filled
-                entries.push((
-                    String::from_utf8(first_entry.file_name().to_bytes().to_vec())
-                        .map_err(|_| rustix::io::Errno::INVAL)?,
-                    first_entry.file_type(),
-                ));
-                break dir;
-            }
-            Some(Err(rustix::io::Errno::INVAL)) => {
-                // buffer too small
-                buf.resize(buf.len().saturating_mul(2), MaybeUninit::uninit());
-            }
-            Some(Err(e)) => {
-                return Err(e);
-            }
-        }
-    };
-
-    while !dir.is_buffer_empty() {
-        match dir.next() {
-            None => {
-                return Ok(entries);
-            }
-            Some(Err(_)) => unreachable!("no IO performed here"),
-            Some(Ok(entry)) => {
-                entries.push((
-                    String::from_utf8(entry.file_name().to_bytes().to_vec())
-                        .map_err(|_| rustix::io::Errno::INVAL)?,
-                    entry.file_type(),
-                ));
-            }
-        }
-    }
-
-    Ok(entries)
 }
