@@ -5,52 +5,10 @@ use object_store::{
     Error, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path},
 };
-use rustix::{
-    fs::{AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat},
-    io::ReadWriteFlags,
-};
+use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, RenameFlags, Stat};
 use uuid::Uuid;
 
-use crate::constants::{STAGING_FILE_PREFIX, STORE_NAME};
-
-/// Set `0o750` = `user=rwx + group=rx`
-///
-/// The `x` flag is required for directory traversal.
-pub(crate) fn mode_create_file() -> Mode {
-    Mode::RUSR | Mode::WUSR | Mode::RGRP
-}
-
-/// Set `0x640` = `user=rw + group=rw`.
-pub(crate) fn mode_create_dir() -> Mode {
-    Mode::RWXU | Mode::RGRP | Mode::XGRP
-}
-
-pub(crate) fn oflags_create() -> OFlags {
-    OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::TMPFILE | OFlags::WRONLY
-}
-
-pub(crate) fn oflags_dir() -> OFlags {
-    OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
-}
-
-pub(crate) fn oflags_read() -> OFlags {
-    OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::RDONLY
-}
-
-pub(crate) fn rflags() -> ResolveFlags {
-    ResolveFlags::BENEATH
-        | ResolveFlags::NO_MAGICLINKS
-        | ResolveFlags::NO_SYMLINKS
-        | ResolveFlags::NO_XDEV
-}
-
-pub(crate) fn rwflags() -> ReadWriteFlags {
-    // `RWF_DONTCACHE` is not in rustix yet
-    // https://github.com/torvalds/linux/blob/9d66f26fefacebfeed15de31c1123451a17ff119/include/uapi/linux/fs.h#L448-L449
-    // ReadWriteFlags::from_bits_retain(128)
-    // TODO: "don't cache" is not supported by tmpfs, so this makes testing harder. We'll likely need some feature detection.
-    ReadWriteFlags::empty()
-}
+use crate::constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME};
 
 pub(crate) async fn spawn_io<F, R>(f: F) -> Result<R>
 where
@@ -134,7 +92,7 @@ pub(crate) fn open_dir_fd(
     // TODO: introduce a read-only flag where we could skip this
     rustix::fs::fsync(parent)?;
 
-    let child_fd = rustix::fs::openat2(parent, child, oflags_dir(), Mode::empty(), rflags())?;
+    let child_fd = rustix::fs::openat2(parent, child, OFLAGS_DIR, Mode::empty(), RESOLVE_FLAGS)?;
     Ok(Arc::new(child_fd))
 }
 
@@ -223,7 +181,7 @@ pub(crate) fn flock_dir(dir_fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> 
 
     // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
     // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
-    let lock_fd = rustix::fs::openat2(dir_fd, ".", oflags_read(), Mode::empty(), rflags())?;
+    let lock_fd = rustix::fs::openat2(dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)?;
     rustix::fs::flock(&lock_fd, FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)

@@ -6,13 +6,13 @@ use object_store::{
 use rustix::fs::{AtFlags, Mode};
 
 use crate::{
-    constants::STORE_NAME,
+    constants::{
+        MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
+        STORE_NAME,
+    },
     error::IOErrorExt,
     state::State,
-    utils::{
-        OpenDirMode, flock_dir, link_at_replace, mode_create_file, oflags_create, oflags_read,
-        rflags, rwflags, split_dirs_and_filename, stat_to_meta,
-    },
+    utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
 
 pub(crate) struct PreparedPutOperation {
@@ -62,9 +62,14 @@ impl PreparedPutOperation {
             mode,
         } = self;
 
-        let file_fd =
-            rustix::fs::openat2(&dir_fd, ".", oflags_create(), mode_create_file(), rflags())
-                .into_other_err()?;
+        let file_fd = rustix::fs::openat2(
+            &dir_fd,
+            ".",
+            OFLAGS_FILE_CREATE,
+            MODE_FILE_CREATE,
+            RESOLVE_FLAGS,
+        )
+        .into_other_err()?;
 
         Ok(RunningPutOperation {
             file_fd,
@@ -96,8 +101,8 @@ impl RunningPutOperation {
         let len = slices.iter().map(|s| s.len()).sum::<usize>();
         let mut offset = start_offset;
         while offset < start_offset + len {
-            let written =
-                rustix::io::pwritev2(file_fd, &slices, offset as _, rwflags()).into_other_err()?;
+            let written = rustix::io::pwritev2(file_fd, &slices, offset as _, READ_WRITE_FLAGS)
+                .into_other_err()?;
             offset += written;
             IoSlice::advance_slices(&mut &mut slices[..], written);
         }
@@ -141,7 +146,7 @@ impl RunningPutOperation {
                 }
 
                 let existing_fd =
-                    rustix::fs::openat2(&dir_fd, &file, oflags_read(), Mode::empty(), rflags())
+                    rustix::fs::openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
                         .into_update_err(&location)?;
 
                 let existing_stat = rustix::fs::fstat(&existing_fd).into_get_err(&location)?;

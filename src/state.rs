@@ -11,8 +11,9 @@ use rustix::fs::Mode;
 use tokio::sync::Mutex;
 
 use crate::{
+    constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    utils::{OpenDirMode, mode_create_dir, oflags_dir, open_dir_fd, spawn_io},
+    utils::{OpenDirMode, open_dir_fd, spawn_io},
 };
 
 #[derive(Debug)]
@@ -24,8 +25,8 @@ pub(crate) struct State {
 impl State {
     pub(crate) async fn new(root: PathBuf) -> Result<Self> {
         let (root, root_fd) = spawn_io(move || {
-            let root_fd = rustix::fs::open(&root, oflags_dir(), Mode::empty())
-                .into_get_err(root.display())?;
+            let root_fd =
+                rustix::fs::open(&root, OFLAGS_DIR, Mode::empty()).into_get_err(root.display())?;
 
             Ok((root, root_fd))
         })
@@ -59,7 +60,7 @@ impl State {
                     (sub_fd, prefix) = spawn_io(move || {
                         if mode == OpenDirMode::Put {
                             // try to create dir
-                            match rustix::fs::mkdirat(&dir_fd, &part, mode_create_dir()) {
+                            match rustix::fs::mkdirat(&dir_fd, &part, MODE_DIR_CREATE) {
                                 Ok(()) => {}
                                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                                     // race
