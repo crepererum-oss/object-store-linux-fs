@@ -5,6 +5,9 @@ use rustix::{
     io::ReadWriteFlags,
 };
 
+/// Default buffer size for [`getdents`](https://man.archlinux.org/man/getdents.2)
+pub(crate) const GETDENTS_BUFFER_SIZE: usize = 1024;
+
 /// [`Mode`] used to potentially create new directories (it will be ignored for existing directories).
 ///
 /// Set `0o750` = `user=rwx + group=rx`

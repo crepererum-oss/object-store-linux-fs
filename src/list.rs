@@ -1,15 +1,17 @@
-use std::{os::fd::OwnedFd, sync::Arc};
+use std::{mem::MaybeUninit, os::fd::OwnedFd, sync::Arc};
 
 use futures_core::stream::BoxStream;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     Error, ListResult, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path, PathPart},
 };
-use rustix::fs::{AtFlags, FileType};
+use rustix::fs::{AtFlags, FileType, Mode};
 
 use crate::{
-    constants::{STAGING_FILE_PREFIX, STORE_NAME},
+    constants::{
+        GETDENTS_BUFFER_SIZE, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
+    },
     error::IOErrorExt,
     state::State,
     utils::{OpenDirMode, open_dir_fd, spawn_io, stat_to_meta},
@@ -26,33 +28,29 @@ pub(crate) fn list(
                 Ok(Some(task)) => {
                     let stream = futures_util::stream::try_unfold(
                         (task, offset),
-                        async move |(mut task, offset)| {
-                            loop {
-                                match task.next().await? {
-                                    None => {
-                                        return Ok(None);
-                                    }
-                                    Some((task_next, None)) => {
-                                        // technically we could filter out branches that are not gonna help, but the
-                                        // tests in `object_store` is broken because they use `Path=String` for
-                                        // comparison, which isn't really hierarchical correct
-                                        task = task_next;
-                                    }
-                                    Some((task_next, Some(meta))) => {
-                                        if offset
-                                            .as_ref()
-                                            .map(|offset| &meta.location > offset)
-                                            .unwrap_or(true)
-                                        {
-                                            return Ok(Some((meta, (task_next, offset))));
-                                        } else {
-                                            task = task_next;
-                                        }
-                                    }
+                        async move |(task, offset)| {
+                            match task.next().await? {
+                                None => Result::<_, Error>::Ok(None),
+                                Some((task_next, metas)) => {
+                                    // technically we could filter out branches that are not gonna help, but the
+                                    // tests in `object_store` is broken because they use `Path=String` for
+                                    // comparison, which isn't really hierarchical correct
+                                    let metas = metas
+                                        .into_iter()
+                                        .filter(|meta| {
+                                            offset
+                                                .as_ref()
+                                                .map(|offset| &meta.location > offset)
+                                                .unwrap_or(true)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let metas = futures_util::stream::iter(metas).map(Ok);
+                                    Ok(Some((metas, (task_next, offset))))
                                 }
                             }
                         },
-                    );
+                    )
+                    .try_flatten();
 
                     Result::<_, Error>::Ok(Box::pin(stream) as BoxStream<'static, _>)
                 }
@@ -85,12 +83,15 @@ pub(crate) async fn list_with_delimiter(
                     extensions: Default::default(),
                 });
             }
-            Some((next_task, maybe_meta)) => {
-                if let Some(meta) = maybe_meta {
-                    metas.push(meta);
-                }
+            Some((next_task, mut metas2)) => {
+                metas.append(&mut metas2);
+
                 match next_task {
-                    NextTask::OpenDir { dir_fds, state: _ } => {
+                    NextTask::OpenDir {
+                        dir_fds,
+                        state: _,
+                        getdents_buffer: _,
+                    } => {
                         let mut common_prefixes = dir_fds
                             .into_iter()
                             .map(|dir_fd| match dir_fd {
@@ -137,12 +138,12 @@ enum NextTask {
     OpenDir {
         dir_fds: Vec<DirFd>,
         state: Arc<State>,
+        getdents_buffer: Vec<MaybeUninit<u8>>,
     },
     ReadNextEntry {
         dir_fds: Vec<DirFd>,
         dir_fd: Arc<OwnedFd>,
-        // TODO: we may wanna use `RawDir` instead, because that way we could control buffer and syscall usage better
-        dir: rustix::fs::Dir,
+        getdents_buffer: Vec<MaybeUninit<u8>>,
         prefix: Option<Path>,
         state: Arc<State>,
     },
@@ -166,6 +167,7 @@ impl NextTask {
             Ok(dir_fd) => Ok(Some(Self::OpenDir {
                 dir_fds: vec![DirFd::Eager { prefix, dir_fd }],
                 state,
+                getdents_buffer: vec![MaybeUninit::uninit(); GETDENTS_BUFFER_SIZE],
             })),
             Err(Error::NotFound { .. }) => Ok(None),
             Err(Error::Generic { source, .. })
@@ -180,9 +182,13 @@ impl NextTask {
         }
     }
 
-    async fn next(self) -> Result<Option<(Self, Option<ObjectMeta>)>> {
+    async fn next(self) -> Result<Option<(Self, Vec<ObjectMeta>)>> {
         match self {
-            Self::OpenDir { mut dir_fds, state } => {
+            Self::OpenDir {
+                mut dir_fds,
+                state,
+                getdents_buffer,
+            } => {
                 let Some(dir_fd) = dir_fds.pop() else {
                     // we're done
                     return Ok(None);
@@ -190,7 +196,22 @@ impl NextTask {
 
                 let maybe_opened = spawn_io(move || {
                     let (prefix, dir_fd) = match dir_fd {
-                        DirFd::Eager { prefix, dir_fd } => (prefix, dir_fd),
+                        DirFd::Eager { prefix, dir_fd } => {
+                            // "list" FD has state, hence we need to re-open the directory
+                            let Some(dir_fd) = rustix::fs::openat2(
+                                &dir_fd,
+                                ".",
+                                OFLAGS_READ,
+                                Mode::empty(),
+                                RESOLVE_FLAGS,
+                            )
+                            .into_list_err()
+                            .transpose()?
+                            else {
+                                return Ok(None);
+                            };
+                            (prefix, Arc::new(dir_fd))
+                        }
                         DirFd::Lazy {
                             child_prefix,
                             parent,
@@ -204,139 +225,182 @@ impl NextTask {
                             (Some(child_prefix), dir_fd)
                         }
                     };
-                    let Some(dir) = rustix::fs::Dir::read_from(&dir_fd)
-                        .into_list_err()
-                        .transpose()?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((prefix, dir, dir_fd)))
+
+                    Ok(Some((prefix, dir_fd)))
                 })
                 .await?;
 
                 match maybe_opened {
-                    Some((prefix, dir, dir_fd)) => Ok(Some((
+                    Some((prefix, dir_fd)) => Ok(Some((
                         Self::ReadNextEntry {
                             dir_fds,
-                            dir,
+                            getdents_buffer,
                             dir_fd,
                             prefix,
                             state,
                         },
-                        None,
+                        vec![],
                     ))),
-                    None => Ok(Some((Self::OpenDir { dir_fds, state }, None))),
+                    None => Ok(Some((
+                        Self::OpenDir {
+                            dir_fds,
+                            state,
+                            getdents_buffer,
+                        },
+                        vec![],
+                    ))),
                 }
             }
             Self::ReadNextEntry {
                 mut dir_fds,
-                mut dir,
+                mut getdents_buffer,
                 dir_fd,
                 prefix,
                 state,
             } => {
-                let read_res = spawn_io(move || {
-                    loop {
-                        match dir.read() {
-                            // skip special entries
-                            Some(Ok(entry)) if entry.file_name().to_bytes() == b"." => {}
-                            Some(Ok(entry)) if entry.file_name().to_bytes() == b".." => {}
-                            Some(Ok(entry))
-                                if entry
-                                    .file_name()
-                                    .to_bytes()
-                                    .starts_with(STAGING_FILE_PREFIX.as_bytes()) => {}
-                            // found something
-                            Some(Ok(entry)) => return Ok(Some((dir, entry))),
-                            // error
-                            Some(Err(e)) => match e.into_list_err() {
-                                Some(e) => return Err(e),
-                                None => return Ok(None),
-                            },
-                            // end
-                            None => return Ok(None),
-                        }
-                    }
+                let (mut dir_fd, getdents_buffer, entries) = spawn_io(move || {
+                    let entries = getdents(&dir_fd, &mut getdents_buffer)
+                        .into_list_err()
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok((dir_fd, getdents_buffer, entries))
                 })
                 .await?;
 
-                match read_res {
-                    None => {
-                        // end of directory
-                        Ok(Some((Self::OpenDir { dir_fds, state }, None)))
-                    }
-                    Some((dir, entry)) => {
-                        let child_str = entry.file_name().to_str().map_err(|e| Error::Generic {
-                            store: STORE_NAME,
-                            source: Box::new(e),
-                        })?;
+                if entries.is_empty() {
+                    // end of directory
+                    Ok(Some((
+                        Self::OpenDir {
+                            dir_fds,
+                            state,
+                            getdents_buffer,
+                        },
+                        vec![],
+                    )))
+                } else {
+                    let mut metas = Vec::with_capacity(entries.len());
+
+                    for (file_name, file_type) in entries {
+                        // skip special entries
+                        if file_name == "."
+                            || file_name == ".."
+                            || file_name.starts_with(STAGING_FILE_PREFIX)
+                        {
+                            continue;
+                        }
+
                         let child_path = match &prefix {
                             Some(prefix) => prefix.clone().join(
                                 // parse part before handing it to join, because `PathPart::from(str)` will percent-encode it
-                                PathPart::parse(child_str).map_err(|e| Error::InvalidPath {
+                                PathPart::parse(&file_name).map_err(|e| Error::InvalidPath {
                                     source: object_store::path::Error::BadSegment {
-                                        path: child_str.to_owned(),
+                                        path: file_name.clone(),
                                         source: e,
                                     },
                                 })?,
                             ),
-                            None => Path::parse(child_str)?,
+                            None => Path::parse(&file_name)?,
                         };
-                        let child_string = child_str.to_owned();
 
-                        match entry.file_type() {
+                        match file_type {
                             FileType::RegularFile => {
-                                let (dir_fd, maybe_stat) = spawn_io(move || {
-                                    let maybe_stat = rustix::fs::statat(
-                                        &dir_fd,
-                                        &child_string,
-                                        AtFlags::empty(),
-                                    )
-                                    .into_list_err()
-                                    .transpose()?;
+                                let maybe_stat;
+                                (dir_fd, maybe_stat) = spawn_io(move || {
+                                    let maybe_stat =
+                                        rustix::fs::statat(&dir_fd, &file_name, AtFlags::empty())
+                                            .into_list_err()
+                                            .transpose()?;
                                     Ok((dir_fd, maybe_stat))
                                 })
                                 .await?;
 
-                                let meta = maybe_stat
+                                if let Some(meta) = maybe_stat
                                     .map(|stat| stat_to_meta(stat, child_path))
-                                    .transpose()?;
-                                let task = Self::ReadNextEntry {
-                                    dir_fds,
-                                    dir,
-                                    dir_fd,
-                                    prefix,
-                                    state,
-                                };
-
-                                Ok(Some((task, meta)))
+                                    .transpose()?
+                                {
+                                    metas.push(meta);
+                                }
                             }
                             FileType::Directory => {
                                 dir_fds.push(DirFd::Lazy {
                                     child_prefix: child_path,
                                     parent: Arc::clone(&dir_fd),
-                                    child: child_string,
+                                    child: file_name,
                                 });
-
-                                Ok(Some((
-                                    Self::ReadNextEntry {
-                                        dir_fds,
-                                        dir,
-                                        dir_fd,
-                                        prefix,
-                                        state,
-                                    },
-                                    None,
-                                )))
                             }
-                            other => Err(Error::Generic {
-                                store: STORE_NAME,
-                                source: format!("invalid file type: {other:?}").into(),
-                            }),
+                            other => {
+                                return Err(Error::Generic {
+                                    store: STORE_NAME,
+                                    source: format!("invalid file type: {other:?}").into(),
+                                });
+                            }
                         }
                     }
+
+                    Ok(Some((
+                        Self::ReadNextEntry {
+                            dir_fds,
+                            getdents_buffer,
+                            dir_fd,
+                            prefix,
+                            state,
+                        },
+                        metas,
+                    )))
                 }
             }
         }
     }
+}
+
+fn getdents(
+    fd: &OwnedFd,
+    buf: &mut Vec<MaybeUninit<u8>>,
+) -> Result<Vec<(String, FileType)>, rustix::io::Errno> {
+    let mut entries = vec![];
+
+    let mut dir = loop {
+        let mut dir = rustix::fs::RawDir::new(fd, buf);
+
+        match dir.next() {
+            None => {
+                // no entries left
+                return Ok(entries);
+            }
+            Some(Ok(first_entry)) => {
+                // buffer filled
+                entries.push((
+                    String::from_utf8(first_entry.file_name().to_bytes().to_vec())
+                        .map_err(|_| rustix::io::Errno::INVAL)?,
+                    first_entry.file_type(),
+                ));
+                break dir;
+            }
+            Some(Err(rustix::io::Errno::INVAL)) => {
+                // buffer too small
+                buf.resize(buf.len().saturating_mul(2), MaybeUninit::uninit());
+            }
+            Some(Err(e)) => {
+                return Err(e);
+            }
+        }
+    };
+
+    while !dir.is_buffer_empty() {
+        match dir.next() {
+            None => {
+                return Ok(entries);
+            }
+            Some(Err(_)) => unreachable!("no IO performed here"),
+            Some(Ok(entry)) => {
+                entries.push((
+                    String::from_utf8(entry.file_name().to_bytes().to_vec())
+                        .map_err(|_| rustix::io::Errno::INVAL)?,
+                    entry.file_type(),
+                ));
+            }
+        }
+    }
+
+    Ok(entries)
 }

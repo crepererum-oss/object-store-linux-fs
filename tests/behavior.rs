@@ -3,7 +3,7 @@
 use std::{assert_matches, os::unix::fs::PermissionsExt};
 
 use futures_core::future::BoxFuture;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     Attribute, AttributeValue, Attributes, Error, MultipartUpload, ObjectStore, ObjectStoreExt,
     PutOptions, PutPayload, path::Path,
@@ -350,4 +350,48 @@ async fn weird_attributes() {
 
     let get_res = storage.get(&loc).await.unwrap();
     assert_eq!(get_res.attributes, attrs);
+}
+
+#[tokio::test]
+async fn list_state() {
+    const N_FILES: usize = 1_000;
+
+    for prefix in ["", "prefix/"] {
+        println!("prefix: {prefix}");
+
+        let path = tempfile::tempdir().unwrap();
+        let storage = LinuxFS::new(path.path().to_path_buf()).await.unwrap();
+
+        let mut files = (0..N_FILES)
+            .map(|idx| Path::parse(format!("{prefix}{idx}")).unwrap())
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+
+        for f in &files {
+            storage.put(f, Default::default()).await.unwrap();
+        }
+
+        let mut it1 = storage.list(None);
+        let mut res1 = Vec::with_capacity(N_FILES);
+        for _ in 0..(N_FILES / 2) {
+            res1.push(it1.next().await.unwrap().unwrap().location);
+        }
+
+        let mut res2 = storage
+            .list(None)
+            .map_ok(|meta| meta.location)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        while let Some(meta) = it1.try_next().await.unwrap() {
+            res1.push(meta.location);
+        }
+
+        res1.sort_unstable();
+        res2.sort_unstable();
+
+        assert_eq!(res1, files);
+        assert_eq!(res2, files);
+    }
 }
