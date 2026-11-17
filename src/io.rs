@@ -1,11 +1,16 @@
 use std::{
+    any::Any,
+    cell::UnsafeCell,
     fmt::Debug,
     io::{IoSlice, IoSliceMut},
-    mem::MaybeUninit,
+    marker::PhantomData,
+    mem::{ManuallyDrop, MaybeUninit},
+    ops::{Deref, DerefMut},
     os::fd::OwnedFd,
     sync::Arc,
 };
 
+use lock_api::{GuardNoSend, RawMutex};
 use object_store::Error;
 use rustix::{
     fs::{
@@ -20,6 +25,7 @@ use crate::constants::STORE_NAME;
 
 pub trait IOLayer: Debug + Send + Sync {
     fn start_block(&self) -> Box<dyn IOBlock>;
+    fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
 }
 
 pub trait IOBlock: Send {
@@ -68,6 +74,9 @@ pub trait IOBlock: Send {
         fd: &OwnedFd,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno>;
+
+    /// Lock the given lock.
+    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard>;
 
     /// See <https://man.archlinux.org/man/linkat.2>.
     fn linkat(
@@ -134,12 +143,49 @@ pub trait IOBlock: Send {
     fn uuid(&mut self) -> Uuid;
 }
 
+pub trait IORawMutex: Any + Send + Sync {
+    /// # Safety
+    /// See [`lock_api::RawMutex::unlock`].
+    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>);
+}
+
+pub trait IORawMutexGuard: Any {}
+
 #[derive(Debug)]
 pub struct RustixIOLayer;
+
+struct RustixIORawLock {
+    lock: parking_lot::RawMutex,
+}
+
+impl IORawMutex for RustixIORawLock {
+    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>) {
+        let guard = *(guard as Box<dyn Any>)
+            .downcast::<RustixIORawLockGuard>()
+            .expect("wrong type");
+
+        // SAFETY: caller
+        unsafe {
+            self.lock.unlock(guard.guard);
+        }
+    }
+}
+
+struct RustixIORawLockGuard {
+    guard: GuardNoSend,
+}
+
+impl IORawMutexGuard for RustixIORawLockGuard {}
 
 impl IOLayer for RustixIOLayer {
     fn start_block(&self) -> Box<dyn IOBlock> {
         Box::new(RustixIOBlock)
+    }
+
+    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
+        Box::new(RustixIORawLock {
+            lock: parking_lot::RawMutex::INIT,
+        })
     }
 }
 
@@ -149,6 +195,10 @@ where
 {
     fn start_block(&self) -> Box<dyn IOBlock> {
         self.as_ref().start_block()
+    }
+
+    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
+        self.as_ref().create_raw_mutex()
     }
 }
 
@@ -255,6 +305,15 @@ impl IOBlock for RustixIOBlock {
         Ok(entries)
     }
 
+    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard> {
+        let guard = (raw_lock as &dyn Any)
+            .downcast_ref::<RustixIORawLock>()
+            .expect("wrong type")
+            .lock
+            .lock();
+        Box::new(RustixIORawLockGuard { guard })
+    }
+
     fn linkat(
         &mut self,
         old_dirfd: &OwnedFd,
@@ -353,6 +412,70 @@ where
                 }
             }
         })?
+}
+
+pub(crate) struct IOMutex<T> {
+    data: UnsafeCell<T>,
+    raw: Box<dyn IORawMutex>,
+}
+
+impl<T> IOMutex<T> {
+    pub(crate) fn new(io: &dyn IOLayer, data: T) -> Self {
+        Self {
+            data: UnsafeCell::new(data),
+            raw: io.create_raw_mutex(),
+        }
+    }
+
+    pub(crate) fn lock(&self, io: &mut dyn IOBlock) -> IOMutexGuard<'_, T> {
+        let guard = io.lock(self.raw.as_ref());
+
+        IOMutexGuard {
+            mutex: self,
+            marker: PhantomData,
+            guard: ManuallyDrop::new(guard),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for IOMutex<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IOMutex").finish_non_exhaustive()
+    }
+}
+
+unsafe impl<T: Send> Sync for IOMutex<T> {}
+
+pub(crate) struct IOMutexGuard<'a, T> {
+    mutex: &'a IOMutex<T>,
+    marker: PhantomData<&'a mut T>,
+    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
+}
+
+impl<'a, T: 'a> Drop for IOMutexGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Safety: A MutexGuard always holds the lock.
+        unsafe {
+            self.mutex.raw.unlock(ManuallyDrop::take(&mut self.guard));
+        }
+    }
+}
+
+impl<'a, T: 'a> Deref for IOMutexGuard<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { self.mutex.data.get().as_ref_unchecked() }
+    }
+}
+
+impl<'a, T: 'a> DerefMut for IOMutexGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { self.mutex.data.get().as_mut_unchecked() }
+    }
 }
 
 #[cfg(test)]

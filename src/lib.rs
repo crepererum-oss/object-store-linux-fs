@@ -114,16 +114,17 @@ impl ObjectStore for LinuxFS {
             });
         }
 
-        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Get)?;
-        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
-        let file = file.to_owned();
+        let state = Arc::clone(&self.state);
         let location = location.clone();
         let read_buffer_size = self.state.options().read_buffer_size.get();
         let io_layer = Arc::clone(&self.state.options().io_layer);
 
         spawn_io(&self.state.options().io_layer, move |io| {
+            let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
+            let dir_fd = state.open_dir(io, dirs, OpenDirMode::Get)?;
+
             let file_fd = io
-                .openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                .openat2(&dir_fd, file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
                 .into_get_err(&location)?;
 
             let stat = io.fstat(&file_fd).into_get_err(&location)?;
@@ -207,15 +208,16 @@ impl ObjectStore for LinuxFS {
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let (dirs, file) = split_dirs_and_filename(location, OpenDirMode::Get)?;
-        let dir_fd = self.state.open_dir(dirs, OpenDirMode::Get).await?;
-        let file = file.to_owned();
+        let state = Arc::clone(&self.state);
         let location = location.clone();
         let ranges = ranges.to_vec();
 
         spawn_io(&self.state.options().io_layer, move |io| {
+            let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
+            let dir_fd = state.open_dir(io, dirs, OpenDirMode::Get)?;
+
             let file_fd = io
-                .openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                .openat2(&dir_fd, file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
                 .into_get_err(&location)?;
 
             let stat = io.fstat(&file_fd).into_get_err(&location)?;
@@ -269,12 +271,13 @@ impl ObjectStore for LinuxFS {
         Box::pin(locations.and_then(move |location| {
             let state = Arc::clone(&state);
             async move {
-                let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
-                let dir_fd = state.open_dir(dirs, OpenDirMode::Get).await?;
-                let file = file.to_owned();
+                let state2 = Arc::clone(&state);
                 let location = spawn_io(&state.options().io_layer, move |io| {
+                    let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
+                    let dir_fd = state2.open_dir(io, dirs, OpenDirMode::Get)?;
+
                     let _lock_fd = flock_dir(io, &dir_fd).into_other_err()?;
-                    io.unlinkat(&dir_fd, &file, AtFlags::empty())
+                    io.unlinkat(&dir_fd, file, AtFlags::empty())
                         .into_get_err(&location)?;
                     io.fsync(&dir_fd).into_other_err()?;
                     Ok(location)
@@ -312,28 +315,27 @@ impl ObjectStore for LinuxFS {
             extensions: _,
         } = options;
 
-        let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
-        let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
-
-        let (to_dir_fd, to_file) = if same_dir(from, to) {
-            let (_to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-            (Arc::clone(&from_dir_fd), to_file)
-        } else {
-            let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-            let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
-            (to_dir_fd, to_file)
-        };
-
-        let from_file = from_file.to_owned();
-        let to_file = to_file.to_owned();
+        let state = Arc::clone(&self.state);
         let from = from.clone();
         let to = to.clone();
 
         spawn_io(&self.state.options().io_layer, move |io| {
+            let (from_dirs, from_file) = split_dirs_and_filename(&from, OpenDirMode::Get)?;
+            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
+
+            let (to_dir_fd, to_file) = if same_dir(&from, &to) {
+                let (_to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
+                (Arc::clone(&from_dir_fd), to_file)
+            } else {
+                let (to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
+                let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
+                (to_dir_fd, to_file)
+            };
+
             let file_fd = io
                 .openat2(
                     &from_dir_fd,
-                    &from_file,
+                    from_file,
                     OFLAGS_READ,
                     Mode::empty(),
                     RESOLVE_FLAGS,
@@ -347,10 +349,10 @@ impl ObjectStore for LinuxFS {
 
             match mode {
                 CopyMode::Overwrite => {
-                    link_at_replace(io, &file_fd, &to_dir_fd, &to_file).into_other_err()?;
+                    link_at_replace(io, &file_fd, &to_dir_fd, to_file).into_other_err()?;
                 }
                 CopyMode::Create => {
-                    io.linkat(&file_fd, "", &to_dir_fd, &to_file, AtFlags::EMPTY_PATH)
+                    io.linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
                         .into_put_err(to)?;
                 }
             }
@@ -367,28 +369,28 @@ impl ObjectStore for LinuxFS {
             // ignore extensions
             extensions: _,
         } = options;
-        let (from_dirs, from_file) = split_dirs_and_filename(from, OpenDirMode::Get)?;
-        let from_dir_fd = self.state.open_dir(from_dirs, OpenDirMode::Get).await?;
 
-        let (to_dir_fd, to_file) = if same_dir(from, to) {
-            let (_to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-            (Arc::clone(&from_dir_fd), to_file)
-        } else {
-            let (to_dirs, to_file) = split_dirs_and_filename(to, OpenDirMode::Put)?;
-            let to_dir_fd = self.state.open_dir(to_dirs, OpenDirMode::Put).await?;
-            (to_dir_fd, to_file)
-        };
-
-        let from_file = from_file.to_owned();
-        let to_file = to_file.to_owned();
+        let state = Arc::clone(&self.state);
         let from = from.clone();
         let to = to.clone();
 
         spawn_io(&self.state.options().io_layer, move |io| {
+            let (from_dirs, from_file) = split_dirs_and_filename(&from, OpenDirMode::Get)?;
+            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
+
+            let (to_dir_fd, to_file) = if same_dir(&from, &to) {
+                let (_to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
+                (Arc::clone(&from_dir_fd), to_file)
+            } else {
+                let (to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
+                let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
+                (to_dir_fd, to_file)
+            };
+
             let file_fd = io
                 .openat2(
                     &from_dir_fd,
-                    &from_file,
+                    from_file,
                     OFLAGS_READ,
                     Mode::empty(),
                     RESOLVE_FLAGS,
@@ -408,14 +410,14 @@ impl ObjectStore for LinuxFS {
 
             match target_mode {
                 RenameTargetMode::Overwrite => {
-                    link_at_replace(io, &file_fd, &to_dir_fd, &to_file).into_other_err()?;
+                    link_at_replace(io, &file_fd, &to_dir_fd, to_file).into_other_err()?;
                 }
                 RenameTargetMode::Create => {
-                    io.linkat(&file_fd, "", &to_dir_fd, &to_file, AtFlags::EMPTY_PATH)
+                    io.linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
                         .into_put_err(to)?;
                 }
             }
-            io.unlinkat(&from_dir_fd, &from_file, AtFlags::empty())
+            io.unlinkat(&from_dir_fd, from_file, AtFlags::empty())
                 .into_get_err(&from)?;
 
             // fsync AFTER both operations complete and in-order

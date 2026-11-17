@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     fmt::Write,
     mem::MaybeUninit,
     os::unix::prelude::OwnedFd,
@@ -6,7 +7,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use object_store_linux_fs::io::{IOBlock, IOLayer, RustixIOLayer};
+use object_store_linux_fs::io::{IOBlock, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer};
 use rustix::io::Errno;
 use uuid::Uuid;
 
@@ -18,6 +19,8 @@ pub mod log;
 struct State {
     log: Vec<LogEntry>,
     block_counter: u64,
+    guard_counter: u64,
+    lock_counter: u64,
     uuid_counter: u128,
 }
 
@@ -67,6 +70,31 @@ impl IOLayer for DebugIOLayer {
             task_id,
             block_id,
             state: Arc::clone(&self.state),
+        })
+    }
+
+    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
+        let state = Arc::clone(&self.state);
+        let mut guard = self.state.lock().unwrap();
+
+        let id = guard.lock_counter;
+        guard.lock_counter += 1;
+
+        let task_id = 0; // TODO
+        let block_id = 0; // TODO
+
+        guard.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "create_mutex",
+            args: IndexMap::default(),
+            res: Ok(Value::ID("mutex", id)),
+        });
+
+        Box::new(DebugIORawMutex {
+            id,
+            inner: self.inner.create_raw_mutex(),
+            state,
         })
     }
 }
@@ -228,6 +256,31 @@ impl IOBlock for DebugIOBlock {
             f: |inner, _| inner.getdents(fd, buf),
             map_ok: |_| Value::Ellipsis,
         })
+    }
+
+    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard> {
+        let lock = (raw_lock as &dyn Any)
+            .downcast_ref::<DebugIORawMutex>()
+            .expect("wrong type");
+
+        self.event(Event {
+            fun: "lock",
+            args: IndexMap::from([("mutex", Value::ID("mutex", lock.id))]),
+            f: |inner, state| {
+                let inner = inner.lock(lock.inner.as_ref());
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
+            },
+            map_ok: |guard| {
+                let id = (guard.as_ref() as &dyn Any)
+                    .downcast_ref::<DebugIORawMutexGuard>()
+                    .expect("just created that type")
+                    .id;
+                Value::ID("guard", id)
+            },
+        })
+        .expect("never fails")
     }
 
     fn linkat(
@@ -433,3 +486,63 @@ where
     f: F,
     map_ok: O,
 }
+
+struct DebugIORawMutex {
+    id: u64,
+    inner: Box<dyn IORawMutex>,
+    state: Arc<Mutex<State>>,
+}
+
+impl Drop for DebugIORawMutex {
+    fn drop(&mut self) {
+        let mut guard = self.state.lock().unwrap();
+
+        // TODO
+        let task_id = 0;
+        let block_id = 0;
+
+        guard.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "destroy_mutex",
+            args: IndexMap::from([("mutex", Value::ID("mutex", self.id))]),
+            res: Ok(Value::Unit),
+        });
+    }
+}
+
+impl IORawMutex for DebugIORawMutex {
+    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>) {
+        let dbg_guard = (guard as Box<dyn Any>)
+            .downcast::<DebugIORawMutexGuard>()
+            .expect("wrong type");
+        let mut guard2 = self.state.lock().unwrap();
+
+        // SAFETY: caller
+        unsafe {
+            self.inner.unlock(dbg_guard.inner);
+        }
+
+        // TODO
+        let task_id = 0;
+        let block_id = 0;
+
+        guard2.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "unlock",
+            args: IndexMap::from([
+                ("mutex", Value::ID("mutex", self.id)),
+                ("guard", Value::ID("guard", dbg_guard.id)),
+            ]),
+            res: Ok(Value::Unit),
+        });
+    }
+}
+
+struct DebugIORawMutexGuard {
+    id: u64,
+    inner: Box<dyn IORawMutexGuard>,
+}
+
+impl IORawMutexGuard for DebugIORawMutexGuard {}

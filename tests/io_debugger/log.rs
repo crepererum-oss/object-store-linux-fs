@@ -20,6 +20,7 @@ impl std::fmt::Display for Flag {
 pub enum Value {
     Ellipsis,
     Flags(IndexSet<Flag>),
+    ID(&'static str, u64),
     String(String),
     Unit,
 }
@@ -57,6 +58,7 @@ impl std::fmt::Display for Value {
                     Ok(())
                 }
             }
+            Self::ID(what, id) => write!(f, "{what}#{id}"),
             Self::String(s) => write!(f, "\"{s}\""),
             Self::Unit => write!(f, "()"),
         }

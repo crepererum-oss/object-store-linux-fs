@@ -152,17 +152,20 @@ enum NextTask {
 
 impl NextTask {
     async fn start(state: Arc<State>, prefix: Option<Path>) -> Result<Option<Self>> {
-        let dir_fd_res = match &prefix {
-            Some(prefix) => {
-                state
-                    .open_dir(
-                        prefix.as_ref().split(DELIMITER_CHAR).map(Ok),
-                        OpenDirMode::Get,
-                    )
-                    .await
-            }
-            None => state.open_dir(std::iter::empty(), OpenDirMode::Get).await,
-        };
+        let state2 = Arc::clone(&state);
+        let (dir_fd_res, prefix) = spawn_io(&state.options().io_layer, move |io| {
+            let dir_fd_res = match &prefix {
+                Some(prefix) => state2.open_dir(
+                    io,
+                    prefix.as_ref().split(DELIMITER_CHAR).map(Ok),
+                    OpenDirMode::Get,
+                ),
+                None => state2.open_dir(io, std::iter::empty(), OpenDirMode::Get),
+            };
+
+            Ok((dir_fd_res, prefix))
+        })
+        .await?;
 
         match dir_fd_res {
             Ok(dir_fd) => Ok(Some(Self::OpenDir {

@@ -24,23 +24,31 @@ async fn simple_put() {
     let loc = Path::parse("x").unwrap();
     storage.put(&loc, Default::default()).await.unwrap();
 
+    drop(storage);
+
     insta::assert_snapshot!(
         debugger.log(),
         @r#"
     T0 B0 block-start() -> Ok(())
     T0 B0 open(path: ..., flags: DIRECTORY|NOFOLLOW|CLOEXEC, mode: <empty>) -> Ok(...)
     T0 B0 block-end() -> Ok(())
+    T0 B0 create_mutex() -> Ok(mutex#0)
     T0 B1 block-start() -> Ok(())
-    T0 B1 openat2(dirfd: ..., path: ".", oflags: DIRECTORY|NOFOLLOW|WRONLY|CLOEXEC|TMPFILE, mode: RUSR|WUSR|RGRP, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(...)
-    T0 B1 fsync(fd: ...) -> Ok(())
-    T0 B1 openat2(dirfd: ..., path: ".", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(...)
-    T0 B1 flock(fd: ..., operation: ...) -> Ok(())
-    T0 B1 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
-    T0 B1 linkat(old_dirfd: ..., old_path: "", new_dirfd: ..., new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
-    T0 B1 renameat2(old_dirfd: ..., old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: ..., new_path: "x", flags: <empty>) -> Ok(())
-    T0 B1 fsync(fd: ...) -> Ok(())
-    T0 B1 fstat(fd: ...) -> Ok(...)
+    T0 B1 lock(mutex: mutex#0) -> Ok(guard#0)
+    T0 B0 unlock(mutex: mutex#0, guard: guard#0) -> Ok(())
     T0 B1 block-end() -> Ok(())
+    T0 B2 block-start() -> Ok(())
+    T0 B2 openat2(dirfd: ..., path: ".", oflags: DIRECTORY|NOFOLLOW|WRONLY|CLOEXEC|TMPFILE, mode: RUSR|WUSR|RGRP, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(...)
+    T0 B2 fsync(fd: ...) -> Ok(())
+    T0 B2 openat2(dirfd: ..., path: ".", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(...)
+    T0 B2 flock(fd: ..., operation: ...) -> Ok(())
+    T0 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
+    T0 B2 linkat(old_dirfd: ..., old_path: "", new_dirfd: ..., new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
+    T0 B2 renameat2(old_dirfd: ..., old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: ..., new_path: "x", flags: <empty>) -> Ok(())
+    T0 B2 fsync(fd: ...) -> Ok(())
+    T0 B2 fstat(fd: ...) -> Ok(...)
+    T0 B2 block-end() -> Ok(())
+    T0 B0 destroy_mutex(mutex: mutex#0) -> Ok(())
     "#,
     );
 }

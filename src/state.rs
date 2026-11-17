@@ -8,20 +8,19 @@ use std::{
 
 use object_store::{Result, path::Path};
 use rustix::fs::Mode;
-use tokio::sync::Mutex;
 
 use crate::{
     LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    io::spawn_io,
+    io::{IOBlock, IOMutex, spawn_io},
     utils::{OpenDirMode, open_dir_fd},
 };
 
 #[derive(Debug)]
 pub(crate) struct State {
     root: PathBuf,
-    dir_fd_cache: Mutex<HashMap<PathBuf, Arc<OwnedFd>>>,
+    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<OwnedFd>>>,
     options: LinuxFSOptions,
 }
 
@@ -38,17 +37,21 @@ impl State {
 
         Ok(Self {
             root: root.clone(),
-            dir_fd_cache: Mutex::new(HashMap::from([(root, Arc::new(root_fd))])),
+            dir_fd_cache: IOMutex::new(
+                &options.io_layer,
+                HashMap::from([(root, Arc::new(root_fd))]),
+            ),
             options,
         })
     }
 
-    pub(crate) async fn open_dir(
+    pub(crate) fn open_dir<'a>(
         &self,
-        dirs: impl Iterator<Item = Result<&str>>,
+        io: &mut dyn IOBlock,
+        dirs: impl Iterator<Item = Result<&'a str>>,
         mode: OpenDirMode,
     ) -> Result<Arc<OwnedFd>> {
-        let mut dir_fd_cache = self.dir_fd_cache.lock().await;
+        let mut dir_fd_cache = self.dir_fd_cache.lock(io);
         let mut path = self.root.clone();
         let mut prefix = Path::ROOT;
         let mut dir_fd = Arc::clone(dir_fd_cache.get(&path).expect("root is always cached"));
@@ -57,34 +60,29 @@ impl State {
         for part in dirs {
             let part = part?;
             path = path.join(part);
+            prefix = prefix.join(part);
             dir_fd = match dir_fd_cache.entry(path.clone()) {
                 Entry::Occupied(o) => Arc::clone(o.get()),
                 Entry::Vacant(v) => {
-                    let part = part.to_owned();
-                    let sub_fd;
-                    (sub_fd, prefix) = spawn_io(&self.options.io_layer, move |io| {
-                        if mode == OpenDirMode::Put {
-                            // try to create dir
-                            match io.mkdirat(&dir_fd, &part, MODE_DIR_CREATE) {
-                                Ok(()) => {}
-                                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                                    // race
-                                }
-                                Err(e) => {
-                                    return Err(e.into_other_err());
-                                }
+                    if mode == OpenDirMode::Put {
+                        // try to create dir
+                        match io.mkdirat(&dir_fd, part, MODE_DIR_CREATE) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                                // race
+                            }
+                            Err(e) => {
+                                return Err(e.into_other_err());
                             }
                         }
+                    }
 
-                        let sub_fd_res = open_dir_fd(io, &dir_fd, &part);
-                        let sub_fd = match mode {
-                            OpenDirMode::Get => sub_fd_res.into_get_err(&prefix)?,
-                            OpenDirMode::Put => sub_fd_res.into_other_err()?,
-                            OpenDirMode::Update => sub_fd_res.into_update_err(&prefix)?,
-                        };
-                        Ok((sub_fd, prefix))
-                    })
-                    .await?;
+                    let sub_fd_res = open_dir_fd(io, &dir_fd, part);
+                    let sub_fd = match mode {
+                        OpenDirMode::Get => sub_fd_res.into_get_err(&prefix)?,
+                        OpenDirMode::Put => sub_fd_res.into_other_err()?,
+                        OpenDirMode::Update => sub_fd_res.into_update_err(&prefix)?,
+                    };
                     v.insert(Arc::clone(&sub_fd));
                     sub_fd
                 }

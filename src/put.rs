@@ -12,7 +12,7 @@ use crate::{
         MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
     },
     error::IOErrorExt,
-    io::IOBlock,
+    io::{IOBlock, spawn_io},
     state::State,
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
@@ -26,7 +26,7 @@ pub(crate) struct PreparedPutOperation {
 }
 
 impl PreparedPutOperation {
-    pub(crate) async fn new(location: &Path, opts: PutOptions, state: &State) -> Result<Self> {
+    pub(crate) async fn new(location: &Path, opts: PutOptions, state: &Arc<State>) -> Result<Self> {
         let PutOptions {
             mode,
             // ignore tags
@@ -40,12 +40,20 @@ impl PreparedPutOperation {
             PutMode::Overwrite | PutMode::Create => OpenDirMode::Put,
             PutMode::Update(_) => OpenDirMode::Update,
         };
-        let (dirs, file) = split_dirs_and_filename(location, open_dir_mode)?;
-        let dir_fd = state.open_dir(dirs, OpenDirMode::Put).await?;
+
+        let location = location.clone();
+        let state2 = Arc::clone(state);
+        let (location, dir_fd, file) = spawn_io(&state.options().io_layer, move |io| {
+            let (dirs, file) = split_dirs_and_filename(&location, open_dir_mode)?;
+            let file = file.to_owned();
+            let dir_fd = state2.open_dir(io, dirs, OpenDirMode::Put)?;
+            Ok((location, dir_fd, file))
+        })
+        .await?;
 
         Ok(Self {
-            location: location.clone(),
-            file: file.to_owned(),
+            location,
+            file,
             dir_fd,
             mode,
             attributes,
