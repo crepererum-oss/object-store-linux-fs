@@ -16,7 +16,7 @@ impl std::fmt::Display for Flag {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Value {
     Ellipsis,
     Flags(IndexSet<Flag>),

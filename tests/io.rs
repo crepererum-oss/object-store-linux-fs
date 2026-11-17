@@ -1,9 +1,11 @@
-use std::sync::Arc;
+use std::{assert_matches, sync::Arc};
 
-use object_store::{ObjectStoreExt, path::Path};
+use object_store::{
+    Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
+};
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
-use crate::io_debugger::{DebugIOLayer, with_task_id};
+use crate::io_debugger::{DebugIOLayer, order::Matcher, with_task_id};
 
 mod io_debugger;
 
@@ -63,4 +65,85 @@ async fn simple_put() {
     T3 B- destroy_mutex(mutex: mutex#0) -> Ok(())
     "#,
     );
+}
+
+#[tokio::test]
+async fn race_put_create() {
+    let path = tempfile::tempdir().unwrap();
+    let debugger = Arc::new(
+        DebugIOLayer::new().with_order(
+            [
+                Matcher {
+                    task_id: Some(3),
+                    fun: Some("flock"),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("flock"),
+                    ..Default::default()
+                },
+            ]
+            .into(),
+        ),
+    );
+    let storage = LinuxFS::new(
+        path.path().to_path_buf(),
+        LinuxFSOptions {
+            io_layer: Arc::clone(&debugger) as _,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    debugger.wipe_log();
+
+    let loc = Path::parse("x").unwrap();
+
+    let fut1 = with_task_id(2, async {
+        let err = storage
+            .put_opts(
+                &loc,
+                PutPayload::from_static(b"foo"),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::AlreadyExists { .. });
+    });
+    let fut2 = with_task_id(3, async {
+        storage
+            .put_opts(
+                &loc,
+                PutPayload::from_static(b"bar"),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::join!(fut1, fut2);
+
+    let log = debugger.log();
+
+    assert_eq!(
+        storage
+            .get(&loc)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"bar"
+    );
+
+    println!("{log}");
 }

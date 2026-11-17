@@ -13,9 +13,14 @@ use object_store_linux_fs::io::{
 use rustix::io::Errno;
 use uuid::Uuid;
 
-use crate::io_debugger::log::{LogEntry, Value};
+use crate::io_debugger::{
+    log::{LogEntry, Value},
+    order::Order,
+};
 
 pub mod log;
+pub mod order;
+mod tests;
 
 tokio::task_local! {
     static ASYNC_TASK_ID: u64;
@@ -47,6 +52,7 @@ struct State {
 pub struct DebugIOLayer {
     inner: RustixIOLayer,
     state: Arc<Mutex<State>>,
+    order: Arc<Order>,
 }
 
 impl DebugIOLayer {
@@ -54,6 +60,14 @@ impl DebugIOLayer {
         Self {
             inner: RustixIOLayer,
             state: Default::default(),
+            order: Default::default(),
+        }
+    }
+
+    pub fn with_order(self, order: Order) -> Self {
+        Self {
+            order: Arc::new(order),
+            ..self
         }
     }
 
@@ -64,6 +78,11 @@ impl DebugIOLayer {
             writeln!(&mut out, "{entry}").unwrap();
         }
         out
+    }
+
+    pub fn wipe_log(&self) {
+        let mut guard = self.state.lock().unwrap();
+        guard.log.clear();
     }
 }
 
@@ -81,6 +100,7 @@ impl IOLayer for DebugIOLayer {
             task_id,
             block_id,
             state: Arc::clone(&self.state),
+            order: Arc::clone(&self.order),
         })
     }
 
@@ -115,6 +135,7 @@ struct DebugIOBlockPrepared {
     task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
+    order: Arc<Order>,
 }
 
 impl IOBlockPrepared for DebugIOBlockPrepared {
@@ -124,6 +145,7 @@ impl IOBlockPrepared for DebugIOBlockPrepared {
             task_id,
             block_id,
             state,
+            order,
         } = self;
 
         let mut guard = state.lock().unwrap();
@@ -146,6 +168,7 @@ impl IOBlockPrepared for DebugIOBlockPrepared {
             task_id: *task_id,
             block_id: *block_id,
             state: Arc::clone(state),
+            order: Arc::clone(order),
         })
     }
 }
@@ -155,30 +178,51 @@ struct DebugIOBlock {
     task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
+    order: Arc<Order>,
 }
 
 impl DebugIOBlock {
-    fn event<F, T, O>(&mut self, evt: Event<F, T, O>) -> Result<T, Errno>
+    fn event<FState, D, FIO, T, O>(&mut self, evt: Event<FState, D, FIO, T, O>) -> Result<T, Errno>
     where
-        F: for<'a> FnOnce(&'a mut dyn IOBlock, &'a mut State) -> Result<T, Errno>,
+        FState: for<'a> FnOnce(&'a mut State) -> D,
+        FIO: for<'a> FnOnce(&'a mut dyn IOBlock, D) -> Result<T, Errno>,
         O: for<'a> FnOnce(&'a T) -> Value,
     {
         let Event {
             fun,
             args,
+            state,
             f,
             map_ok,
         } = evt;
 
-        let mut guard = self.state.lock().unwrap();
-        let res = f(self.inner.as_mut(), &mut guard);
-        guard.log.push(LogEntry {
+        // wait for our turn BEFORE capturing the state lock
+        let arrange_guard = self.order.arrange(order::Call {
+            task_id: self.task_id,
+            block_id: Some(self.block_id),
+            fun,
+            args: &args,
+        });
+
+        let mut state_guard = self.state.lock().unwrap();
+        let data = state(&mut state_guard);
+        drop(state_guard);
+
+        let res = f(self.inner.as_mut(), data);
+
+        let mut state_guard = self.state.lock().unwrap();
+        state_guard.log.push(LogEntry {
             task_id: self.task_id,
             block_id: Some(self.block_id),
             fun,
             args,
             res: res.as_ref().map(map_ok).map_err(|e| *e),
         });
+
+        // drop guards in order
+        drop(state_guard);
+        drop(arrange_guard);
+
         res
     }
 }
@@ -218,7 +262,8 @@ impl IOBlock for DebugIOBlock {
                 ("name", Value::String(name.to_owned())),
                 ("value", Value::Ellipsis),
             ]),
-            f: |inner, _| inner.fgetxattr(fd.inner.as_ref(), name, value),
+            state: |_| (),
+            f: |inner, ()| inner.fgetxattr(fd.inner.as_ref(), name, value),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -234,7 +279,8 @@ impl IOBlock for DebugIOBlock {
                 ("fd", Value::ID("fd", fd.id)),
                 ("name", Value::String(name.to_owned())),
             ]),
-            f: |inner, _| inner.fgetxattr_query(fd.inner.as_ref(), name),
+            state: |_| (),
+            f: |inner, ()| inner.fgetxattr_query(fd.inner.as_ref(), name),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -251,7 +297,8 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "flistxattr",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("list", Value::Ellipsis)]),
-            f: |inner, _| inner.flistxattr(fd.inner.as_ref(), list),
+            state: |_| (),
+            f: |inner, ()| inner.flistxattr(fd.inner.as_ref(), list),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -264,7 +311,8 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "flistxattr_query",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
-            f: |inner, _| inner.flistxattr_query(fd.inner.as_ref()),
+            state: |_| (),
+            f: |inner, ()| inner.flistxattr_query(fd.inner.as_ref()),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -280,7 +328,8 @@ impl IOBlock for DebugIOBlock {
                 ("fd", Value::ID("fd", fd.id)),
                 ("operation", Value::Ellipsis),
             ]),
-            f: |inner, _| inner.flock(fd.inner.as_ref(), operation),
+            state: |_| (),
+            f: |inner, ()| inner.flock(fd.inner.as_ref(), operation),
             map_ok: |()| Value::Unit,
         })
     }
@@ -293,7 +342,8 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "fstat",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
-            f: |inner, _| inner.fstat(fd.inner.as_ref()),
+            state: |_| (),
+            f: |inner, ()| inner.fstat(fd.inner.as_ref()),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -317,7 +367,8 @@ impl IOBlock for DebugIOBlock {
                 ("value", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.fsetxattr(fd.inner.as_ref(), name, value, flags),
+            state: |_| (),
+            f: |inner, ()| inner.fsetxattr(fd.inner.as_ref(), name, value, flags),
             map_ok: |()| Value::Unit,
         })
     }
@@ -330,7 +381,8 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "fsync",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
-            f: |inner, _| inner.fsync(fd.inner.as_ref()),
+            state: |_| (),
+            f: |inner, ()| inner.fsync(fd.inner.as_ref()),
             map_ok: |()| Value::Unit,
         })
     }
@@ -347,7 +399,8 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "getdents",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("buf", Value::Ellipsis)]),
-            f: |inner, _| inner.getdents(fd.inner.as_ref(), buf),
+            state: |_| (),
+            f: |inner, ()| inner.getdents(fd.inner.as_ref(), buf),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -360,10 +413,13 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "lock",
             args: IndexMap::from([("mutex", Value::ID("mutex", lock.id))]),
-            f: |inner, state| {
-                let inner = inner.lock(lock.inner.as_ref());
+            state: |state| {
                 let id = state.guard_counter;
                 state.guard_counter += 1;
+                id
+            },
+            f: |inner, id| {
+                let inner = inner.lock(lock.inner.as_ref());
                 Ok(Box::new(DebugIORawMutexGuard { id, inner }))
             },
             map_ok: |guard| {
@@ -401,7 +457,8 @@ impl IOBlock for DebugIOBlock {
                 ("new_path", Value::String(new_path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| {
+            state: |_| (),
+            f: |inner, ()| {
                 inner.linkat(
                     old_dirfd.inner.as_ref(),
                     old_path,
@@ -431,7 +488,8 @@ impl IOBlock for DebugIOBlock {
                 ("path", Value::String(path.to_owned())),
                 ("mode", Value::flags(mode)),
             ]),
-            f: |inner, _| inner.mkdirat(dirfd.inner.as_ref(), path, mode),
+            state: |_| (),
+            f: |inner, ()| inner.mkdirat(dirfd.inner.as_ref(), path, mode),
             map_ok: |()| Value::Unit,
         })
     }
@@ -451,11 +509,13 @@ impl IOBlock for DebugIOBlock {
                 ("flags", Value::flags(flags)),
                 ("mode", Value::flags(mode)),
             ]),
-            f: |inner, state| {
-                let inner = inner.open(path, flags, mode)?;
-
+            state: |state| {
                 let id = state.fd_counter;
                 state.fd_counter += 1;
+                id
+            },
+            f: |inner, id| {
+                let inner = inner.open(path, flags, mode)?;
 
                 Ok(Box::new(DebugIOFD {
                     inner,
@@ -497,11 +557,13 @@ impl IOBlock for DebugIOBlock {
                 ("mode", Value::flags(mode)),
                 ("resolve", Value::flags(resolve)),
             ]),
-            f: |inner, state| {
-                let inner = inner.openat2(dirfd.inner.as_ref(), path, oflags, mode, resolve)?;
-
+            state: |state| {
                 let id = state.fd_counter;
                 state.fd_counter += 1;
+                id
+            },
+            f: |inner, id| {
+                let inner = inner.openat2(dirfd.inner.as_ref(), path, oflags, mode, resolve)?;
 
                 Ok(Box::new(DebugIOFD {
                     inner,
@@ -540,7 +602,8 @@ impl IOBlock for DebugIOBlock {
                 ("offset", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.preadv2(fd.inner.as_ref(), bufs, offset, flags),
+            state: |_| (),
+            f: |inner, ()| inner.preadv2(fd.inner.as_ref(), bufs, offset, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -564,7 +627,8 @@ impl IOBlock for DebugIOBlock {
                 ("offset", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.pwritev2(fd.inner.as_ref(), bufs, offset, flags),
+            state: |_| (),
+            f: |inner, ()| inner.pwritev2(fd.inner.as_ref(), bufs, offset, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -593,7 +657,8 @@ impl IOBlock for DebugIOBlock {
                 ("new_path", Value::String(new_path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| {
+            state: |_| (),
+            f: |inner, ()| {
                 inner.renameat2(
                     old_dirfd.inner.as_ref(),
                     old_path,
@@ -623,7 +688,8 @@ impl IOBlock for DebugIOBlock {
                 ("path", Value::String(path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.statat(dirfd.inner.as_ref(), path, flags),
+            state: |_| (),
+            f: |inner, ()| inner.statat(dirfd.inner.as_ref(), path, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -645,7 +711,8 @@ impl IOBlock for DebugIOBlock {
                 ("path", Value::String(path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.unlinkat(dirfd.inner.as_ref(), path, flags),
+            state: |_| (),
+            f: |inner, ()| inner.unlinkat(dirfd.inner.as_ref(), path, flags),
             map_ok: |()| Value::Unit,
         })
     }
@@ -654,25 +721,28 @@ impl IOBlock for DebugIOBlock {
         self.event(Event {
             fun: "uuid",
             args: IndexMap::default(),
-            f: |_, state| {
+            state: |state| {
                 let uuid = Uuid::from_u128(state.uuid_counter);
                 state.uuid_counter += 1;
-                Ok(uuid)
+                uuid
             },
+            f: |_, uuid| Ok(uuid),
             map_ok: |uuid| Value::String(uuid.to_string()),
         })
         .expect("never fails")
     }
 }
 
-struct Event<F, T, O>
+struct Event<FState, D, FIO, T, O>
 where
-    F: for<'a> FnOnce(&'a mut dyn IOBlock, &'a mut State) -> Result<T, Errno>,
+    FState: for<'a> FnOnce(&'a mut State) -> D,
+    FIO: for<'a> FnOnce(&'a mut dyn IOBlock, D) -> Result<T, Errno>,
     O: for<'a> FnOnce(&'a T) -> Value,
 {
     fun: &'static str,
     args: IndexMap<&'static str, Value>,
-    f: F,
+    state: FState,
+    f: FIO,
     map_ok: O,
 }
 
