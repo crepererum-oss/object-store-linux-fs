@@ -124,14 +124,20 @@ impl ObjectStore for LinuxFS {
             let dir_fd = state.open_dir(io, dirs, OpenDirMode::Get)?;
 
             let file_fd = io
-                .openat2(&dir_fd, file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                .openat2(
+                    dir_fd.as_ref(),
+                    file,
+                    OFLAGS_READ,
+                    Mode::empty(),
+                    RESOLVE_FLAGS,
+                )
                 .into_get_err(&location)?;
 
-            let stat = io.fstat(&file_fd).into_get_err(&location)?;
+            let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
             let meta = stat_to_meta(stat, location.clone())?;
             options.check_preconditions(&meta)?;
 
-            let attributes = read_attrs_from_fd(io, &file_fd).into_get_err(&location)?;
+            let attributes = read_attrs_from_fd(io, file_fd.as_ref()).into_get_err(&location)?;
 
             let range = match options.range {
                 None => 0..meta.size,
@@ -168,7 +174,7 @@ impl ObjectStore for LinuxFS {
                                 let to_read = buf.len().min(whats_left);
                                 let got = io
                                     .preadv2(
-                                        &file_fd,
+                                        file_fd.as_ref(),
                                         &mut [IoSliceMut::new(&mut buf[..to_read])],
                                         offset as _,
                                         READ_WRITE_FLAGS,
@@ -217,10 +223,16 @@ impl ObjectStore for LinuxFS {
             let dir_fd = state.open_dir(io, dirs, OpenDirMode::Get)?;
 
             let file_fd = io
-                .openat2(&dir_fd, file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                .openat2(
+                    dir_fd.as_ref(),
+                    file,
+                    OFLAGS_READ,
+                    Mode::empty(),
+                    RESOLVE_FLAGS,
+                )
                 .into_get_err(&location)?;
 
-            let stat = io.fstat(&file_fd).into_get_err(&location)?;
+            let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
             stat_to_meta(stat, location.clone())?;
 
             let mut bytes_vec = Vec::with_capacity(ranges.len());
@@ -239,7 +251,7 @@ impl ObjectStore for LinuxFS {
 
                     let got = io
                         .preadv2(
-                            &file_fd,
+                            file_fd.as_ref(),
                             &mut [IoSliceMut::new(
                                 &mut buffer[buffer_offset..(buffer_offset + to_read as usize)],
                             )],
@@ -276,10 +288,10 @@ impl ObjectStore for LinuxFS {
                     let (dirs, file) = split_dirs_and_filename(&location, OpenDirMode::Get)?;
                     let dir_fd = state2.open_dir(io, dirs, OpenDirMode::Get)?;
 
-                    let _lock_fd = flock_dir(io, &dir_fd).into_other_err()?;
-                    io.unlinkat(&dir_fd, file, AtFlags::empty())
+                    let _lock_fd = flock_dir(io, dir_fd.as_ref()).into_other_err()?;
+                    io.unlinkat(dir_fd.as_ref(), file, AtFlags::empty())
                         .into_get_err(&location)?;
-                    io.fsync(&dir_fd).into_other_err()?;
+                    io.fsync(dir_fd.as_ref()).into_other_err()?;
                     Ok(location)
                 })
                 .await?;
@@ -334,7 +346,7 @@ impl ObjectStore for LinuxFS {
 
             let file_fd = io
                 .openat2(
-                    &from_dir_fd,
+                    from_dir_fd.as_ref(),
                     from_file,
                     OFLAGS_READ,
                     Mode::empty(),
@@ -342,21 +354,28 @@ impl ObjectStore for LinuxFS {
                 )
                 .into_get_err(&from)?;
 
-            let stat = io.fstat(&file_fd).into_get_err(&from)?;
+            let stat = io.fstat(file_fd.as_ref()).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            let _to_lock_fd = flock_dir(io, &to_dir_fd).into_other_err()?;
+            let _to_lock_fd = flock_dir(io, to_dir_fd.as_ref()).into_other_err()?;
 
             match mode {
                 CopyMode::Overwrite => {
-                    link_at_replace(io, &file_fd, &to_dir_fd, to_file).into_other_err()?;
+                    link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
+                        .into_other_err()?;
                 }
                 CopyMode::Create => {
-                    io.linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
-                        .into_put_err(to)?;
+                    io.linkat(
+                        file_fd.as_ref(),
+                        "",
+                        to_dir_fd.as_ref(),
+                        to_file,
+                        AtFlags::EMPTY_PATH,
+                    )
+                    .into_put_err(to)?;
                 }
             }
-            io.fsync(&to_dir_fd).into_other_err()?;
+            io.fsync(to_dir_fd.as_ref()).into_other_err()?;
 
             Ok(())
         })
@@ -389,7 +408,7 @@ impl ObjectStore for LinuxFS {
 
             let file_fd = io
                 .openat2(
-                    &from_dir_fd,
+                    from_dir_fd.as_ref(),
                     from_file,
                     OFLAGS_READ,
                     Mode::empty(),
@@ -397,32 +416,39 @@ impl ObjectStore for LinuxFS {
                 )
                 .into_get_err(&from)?;
 
-            let stat = io.fstat(&file_fd).into_get_err(&from)?;
+            let stat = io.fstat(file_fd.as_ref()).into_get_err(from.as_ref())?;
             stat_to_meta(stat, from.clone())?;
 
-            let _from_lock_fd = flock_dir(io, &from_dir_fd).into_other_err()?;
+            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
             let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
                 // don't lock the same directory twice! (deadlock)
                 None
             } else {
-                Some(flock_dir(io, &to_dir_fd).into_other_err()?)
+                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
             };
 
             match target_mode {
                 RenameTargetMode::Overwrite => {
-                    link_at_replace(io, &file_fd, &to_dir_fd, to_file).into_other_err()?;
+                    link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
+                        .into_other_err()?;
                 }
                 RenameTargetMode::Create => {
-                    io.linkat(&file_fd, "", &to_dir_fd, to_file, AtFlags::EMPTY_PATH)
-                        .into_put_err(to)?;
+                    io.linkat(
+                        file_fd.as_ref(),
+                        "",
+                        to_dir_fd.as_ref(),
+                        to_file,
+                        AtFlags::EMPTY_PATH,
+                    )
+                    .into_put_err(to)?;
                 }
             }
-            io.unlinkat(&from_dir_fd, from_file, AtFlags::empty())
+            io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())
                 .into_get_err(&from)?;
 
             // fsync AFTER both operations complete and in-order
-            io.fsync(&to_dir_fd).into_other_err()?;
-            io.fsync(&from_dir_fd).into_other_err()?;
+            io.fsync(to_dir_fd.as_ref()).into_other_err()?;
+            io.fsync(from_dir_fd.as_ref()).into_other_err()?;
 
             Ok(())
         })

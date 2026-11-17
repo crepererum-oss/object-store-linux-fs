@@ -1,4 +1,4 @@
-use std::{mem::MaybeUninit, os::fd::OwnedFd, sync::Arc};
+use std::{mem::MaybeUninit, sync::Arc};
 
 use futures_core::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -13,7 +13,7 @@ use crate::{
         GETDENTS_BUFFER_SIZE, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
-    io::spawn_io,
+    io::{IOFD, spawn_io},
     state::State,
     utils::{OpenDirMode, open_dir_fd, stat_to_meta},
 };
@@ -126,11 +126,11 @@ pub(crate) async fn list_with_delimiter(
 enum DirFd {
     Eager {
         prefix: Option<Path>,
-        dir_fd: Arc<OwnedFd>,
+        dir_fd: Arc<dyn IOFD>,
     },
     Lazy {
         child_prefix: Path,
-        parent: Arc<OwnedFd>,
+        parent: Arc<dyn IOFD>,
         child: String,
     },
 }
@@ -143,7 +143,7 @@ enum NextTask {
     },
     ReadNextEntry {
         dir_fds: Vec<DirFd>,
-        dir_fd: Arc<OwnedFd>,
+        dir_fd: Arc<dyn IOFD>,
         getdents_buffer: Vec<MaybeUninit<u8>>,
         prefix: Option<Path>,
         state: Arc<State>,
@@ -203,20 +203,26 @@ impl NextTask {
                         DirFd::Eager { prefix, dir_fd } => {
                             // "list" FD has state, hence we need to re-open the directory
                             let Some(dir_fd) = io
-                                .openat2(&dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                                .openat2(
+                                    dir_fd.as_ref(),
+                                    ".",
+                                    OFLAGS_READ,
+                                    Mode::empty(),
+                                    RESOLVE_FLAGS,
+                                )
                                 .into_list_err()
                                 .transpose()?
                             else {
                                 return Ok(None);
                             };
-                            (prefix, Arc::new(dir_fd))
+                            (prefix, Arc::from(dir_fd))
                         }
                         DirFd::Lazy {
                             child_prefix,
                             parent,
                             child,
                         } => {
-                            let Some(dir_fd) = open_dir_fd(io, &parent, &child)
+                            let Some(dir_fd) = open_dir_fd(io, parent.as_ref(), &child)
                                 .into_list_err()
                                 .transpose()?
                             else {
@@ -261,7 +267,7 @@ impl NextTask {
                 let (mut dir_fd, getdents_buffer, entries) =
                     spawn_io(&state.options().io_layer, move |io| {
                         let entries = io
-                            .getdents(&dir_fd, &mut getdents_buffer)
+                            .getdents(dir_fd.as_ref(), &mut getdents_buffer)
                             .into_list_err()
                             .transpose()?
                             .unwrap_or_default();
@@ -310,7 +316,7 @@ impl NextTask {
                                 (dir_fd, maybe_stat) =
                                     spawn_io(&state.options().io_layer, move |io| {
                                         let maybe_stat = io
-                                            .statat(&dir_fd, &file_name, AtFlags::empty())
+                                            .statat(dir_fd.as_ref(), &file_name, AtFlags::empty())
                                             .into_list_err()
                                             .transpose()?;
                                         Ok((dir_fd, maybe_stat))

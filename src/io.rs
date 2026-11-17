@@ -36,46 +36,46 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/core/man-pages/fgetxattr.2>.
     fn fgetxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fgetxattr.2>.
-    fn fgetxattr_query(&mut self, fd: &OwnedFd, name: &str) -> Result<usize, Errno>;
+    fn fgetxattr_query(&mut self, fd: &dyn IOFD, name: &str) -> Result<usize, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/flistxattr.2>.
     fn flistxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         list: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/flistxattr.2>.
-    fn flistxattr_query(&mut self, fd: &OwnedFd) -> Result<usize, Errno>;
+    fn flistxattr_query(&mut self, fd: &dyn IOFD) -> Result<usize, Errno>;
 
     /// See <https://man.archlinux.org/man/flock.2>.
-    fn flock(&mut self, fd: &OwnedFd, operation: FlockOperation) -> Result<(), Errno>;
+    fn flock(&mut self, fd: &dyn IOFD, operation: FlockOperation) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fstat.2>.
-    fn fstat(&mut self, fd: &OwnedFd) -> Result<Stat, Errno>;
+    fn fstat(&mut self, fd: &dyn IOFD) -> Result<Stat, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fsetxattr.2>.
     fn fsetxattr(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &[u8],
         flags: XattrFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/fsync.2>.
-    fn fsync(&mut self, fd: &OwnedFd) -> Result<(), Errno>;
+    fn fsync(&mut self, fd: &dyn IOFD) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/getdents.2>.
     fn getdents(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno>;
 
@@ -85,34 +85,38 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/linkat.2>.
     fn linkat(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: AtFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/mkdirat.2>.
-    fn mkdirat(&mut self, dirfd: &OwnedFd, path: &str, mode: Mode) -> Result<(), Errno>;
+    fn mkdirat(&mut self, dirfd: &dyn IOFD, path: &str, mode: Mode) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/open.2>.
-    fn open(&mut self, path: &std::path::Path, flags: OFlags, mode: Mode)
-    -> Result<OwnedFd, Errno>;
+    fn open(
+        &mut self,
+        path: &std::path::Path,
+        flags: OFlags,
+        mode: Mode,
+    ) -> Result<Box<dyn IOFD>, Errno>;
 
     /// See <https://man.archlinux.org/man/openat2.2>.
     fn openat2(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         oflags: OFlags,
         mode: Mode,
         resolve: ResolveFlags,
-    ) -> Result<OwnedFd, Errno>;
+    ) -> Result<Box<dyn IOFD>, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/preadv2.2>.
     fn preadv2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &mut [IoSliceMut<'_>],
         offset: u64,
         flags: ReadWriteFlags,
@@ -121,7 +125,7 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/core/man-pages/pwritev2.2>.
     fn pwritev2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &[IoSlice<'_>],
         offset: u64,
         flags: ReadWriteFlags,
@@ -130,18 +134,18 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/renameat2.2>.
     fn renameat2(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: RenameFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/stat.2>.
-    fn statat(&mut self, dirfd: &OwnedFd, path: &str, flags: AtFlags) -> Result<Stat, Errno>;
+    fn statat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<Stat, Errno>;
 
     /// See <https://man.archlinux.org/man/unlinkat.2>.
-    fn unlinkat(&mut self, dirfd: &OwnedFd, path: &str, flags: AtFlags) -> Result<(), Errno>;
+    fn unlinkat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<(), Errno>;
 
     /// Generate unique UUID,
     fn uuid(&mut self) -> Uuid;
@@ -154,6 +158,8 @@ pub trait IORawMutex: Any + Send + Sync {
 }
 
 pub trait IORawMutexGuard: Any {}
+
+pub trait IOFD: Any + Debug + Send + Sync {}
 
 #[derive(Debug)]
 pub struct RustixIOLayer;
@@ -180,6 +186,13 @@ struct RustixIORawLockGuard {
 }
 
 impl IORawMutexGuard for RustixIORawLockGuard {}
+
+#[derive(Debug)]
+struct RustixIOFD {
+    inner: OwnedFd,
+}
+
+impl IOFD for RustixIOFD {}
 
 impl IOLayer for RustixIOLayer {
     fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
@@ -219,60 +232,88 @@ struct RustixIOBlock;
 impl IOBlock for RustixIOBlock {
     fn fgetxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
-        rustix::fs::fgetxattr(fd, name, value)
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::fgetxattr(&fd.inner, name, value)
     }
 
-    fn fgetxattr_query(&mut self, fd: &OwnedFd, name: &str) -> Result<usize, Errno> {
-        rustix::fs::fgetxattr_query(fd, name)
+    fn fgetxattr_query(&mut self, fd: &dyn IOFD, name: &str) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::fgetxattr_query(&fd.inner, name)
     }
 
     fn flistxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         list: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
-        rustix::fs::flistxattr(fd, list)
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::flistxattr(&fd.inner, list)
     }
 
-    fn flistxattr_query(&mut self, fd: &OwnedFd) -> Result<usize, Errno> {
-        rustix::fs::flistxattr_query(fd)
+    fn flistxattr_query(&mut self, fd: &dyn IOFD) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::flistxattr_query(&fd.inner)
     }
 
-    fn flock(&mut self, fd: &OwnedFd, operation: FlockOperation) -> Result<(), Errno> {
-        rustix::fs::flock(fd, operation)
+    fn flock(&mut self, fd: &dyn IOFD, operation: FlockOperation) -> Result<(), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::flock(&fd.inner, operation)
     }
 
-    fn fstat(&mut self, fd: &OwnedFd) -> Result<Stat, Errno> {
-        rustix::fs::fstat(fd)
+    fn fstat(&mut self, fd: &dyn IOFD) -> Result<Stat, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::fstat(&fd.inner)
     }
 
     fn fsetxattr(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &[u8],
         flags: XattrFlags,
     ) -> Result<(), Errno> {
-        rustix::fs::fsetxattr(fd, name, value, flags)
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::fsetxattr(&fd.inner, name, value, flags)
     }
 
-    fn fsync(&mut self, fd: &OwnedFd) -> Result<(), Errno> {
-        rustix::fs::fsync(fd)
+    fn fsync(&mut self, fd: &dyn IOFD) -> Result<(), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::fsync(&fd.inner)
     }
 
     fn getdents(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+
         let mut entries = vec![];
 
         let mut dir = loop {
-            let mut dir = rustix::fs::RawDir::new(fd, buf);
+            let mut dir = rustix::fs::RawDir::new(&fd.inner, buf);
 
             match dir.next() {
                 None => {
@@ -328,17 +369,32 @@ impl IOBlock for RustixIOBlock {
 
     fn linkat(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: AtFlags,
     ) -> Result<(), Errno> {
-        rustix::fs::linkat(old_dirfd, old_path, new_dirfd, new_path, flags)
+        let old_dirfd = (old_dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        let new_dirfd = (new_dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::linkat(
+            &old_dirfd.inner,
+            old_path,
+            &new_dirfd.inner,
+            new_path,
+            flags,
+        )
     }
 
-    fn mkdirat(&mut self, dirfd: &OwnedFd, path: &str, mode: Mode) -> Result<(), Errno> {
-        rustix::fs::mkdirat(dirfd, path, mode)
+    fn mkdirat(&mut self, dirfd: &dyn IOFD, path: &str, mode: Mode) -> Result<(), Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::mkdirat(&dirfd.inner, path, mode)
     }
 
     fn open(
@@ -346,58 +402,87 @@ impl IOBlock for RustixIOBlock {
         path: &std::path::Path,
         flags: OFlags,
         mode: Mode,
-    ) -> Result<OwnedFd, Errno> {
-        rustix::fs::open(path, flags, mode)
+    ) -> Result<Box<dyn IOFD>, Errno> {
+        let inner = rustix::fs::open(path, flags, mode)?;
+        Ok(Box::new(RustixIOFD { inner }))
     }
 
     fn openat2(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         oflags: OFlags,
         mode: Mode,
         resolve: ResolveFlags,
-    ) -> Result<OwnedFd, Errno> {
-        rustix::fs::openat2(dirfd, path, oflags, mode, resolve)
+    ) -> Result<Box<dyn IOFD>, Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        let inner = rustix::fs::openat2(&dirfd.inner, path, oflags, mode, resolve)?;
+        Ok(Box::new(RustixIOFD { inner }))
     }
 
     fn preadv2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &mut [IoSliceMut<'_>],
         offset: u64,
         flags: ReadWriteFlags,
     ) -> Result<usize, Errno> {
-        rustix::io::preadv2(fd, bufs, offset, flags)
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::io::preadv2(&fd.inner, bufs, offset, flags)
     }
 
     fn pwritev2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &[IoSlice<'_>],
         offset: u64,
         flags: ReadWriteFlags,
     ) -> Result<usize, Errno> {
-        rustix::io::pwritev2(fd, bufs, offset, flags)
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::io::pwritev2(&fd.inner, bufs, offset, flags)
     }
 
     fn renameat2(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: RenameFlags,
     ) -> Result<(), Errno> {
-        rustix::fs::renameat_with(old_dirfd, old_path, new_dirfd, new_path, flags)
+        let old_dirfd = (old_dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        let new_dirfd = (new_dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::renameat_with(
+            &old_dirfd.inner,
+            old_path,
+            &new_dirfd.inner,
+            new_path,
+            flags,
+        )
     }
 
-    fn statat(&mut self, dirfd: &OwnedFd, path: &str, flags: AtFlags) -> Result<Stat, Errno> {
-        rustix::fs::statat(dirfd, path, flags)
+    fn statat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<Stat, Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::statat(&dirfd.inner, path, flags)
     }
 
-    fn unlinkat(&mut self, dirfd: &OwnedFd, path: &str, flags: AtFlags) -> Result<(), Errno> {
-        rustix::fs::unlinkat(dirfd, path, flags)
+    fn unlinkat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<(), Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<RustixIOFD>()
+            .expect("wrong type");
+        rustix::fs::unlinkat(&dirfd.inner, path, flags)
     }
 
     fn uuid(&mut self) -> Uuid {

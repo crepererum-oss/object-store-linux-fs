@@ -1,4 +1,4 @@
-use std::{os::fd::OwnedFd, sync::Arc};
+use std::sync::Arc;
 
 use chrono::DateTime;
 use object_store::{
@@ -9,7 +9,7 @@ use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, RenameFlags, Stat};
 
 use crate::{
     constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME},
-    io::IOBlock,
+    io::{IOBlock, IOFD},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,15 +71,15 @@ fn split_dirs_and_filename_str(location: &Path) -> (Option<&str>, &str) {
 
 pub(crate) fn open_dir_fd(
     io: &mut dyn IOBlock,
-    parent: &OwnedFd,
+    parent: &dyn IOFD,
     child: &str,
-) -> Result<Arc<OwnedFd>, rustix::io::Errno> {
+) -> Result<Arc<dyn IOFD>, rustix::io::Errno> {
     // we still need to fsync because the creating thread/process might die before that
     // TODO: introduce a read-only flag where we could skip this
     io.fsync(parent)?;
 
     let child_fd = io.openat2(parent, child, OFLAGS_DIR, Mode::empty(), RESOLVE_FLAGS)?;
-    Ok(Arc::new(child_fd))
+    Ok(Arc::from(child_fd))
 }
 
 pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
@@ -116,8 +116,8 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
 
 pub(crate) fn link_at_replace(
     io: &mut dyn IOBlock,
-    file_fd: &OwnedFd,
-    dir_fd: &OwnedFd,
+    file_fd: &dyn IOFD,
+    dir_fd: &dyn IOFD,
     file: &str,
 ) -> Result<(), rustix::io::Errno> {
     // TODO: we cannot use `linkat` w/ replacement, see
@@ -159,8 +159,8 @@ fn staging_file_name(io: &mut dyn IOBlock, filename: &str) -> String {
 
 pub(crate) fn flock_dir(
     io: &mut dyn IOBlock,
-    dir_fd: &OwnedFd,
-) -> Result<OwnedFd, rustix::io::Errno> {
+    dir_fd: &dyn IOFD,
+) -> Result<Box<dyn IOFD>, rustix::io::Errno> {
     // TODO: There is no way to replace-override with a file descriptor. Hence we need to use
     //       directory-based locking to ensure the file doesn't change while we're at it. This is
     //       somewhat similar (but not identical) to:
@@ -171,7 +171,7 @@ pub(crate) fn flock_dir(
     // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
     // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
     let lock_fd = io.openat2(dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)?;
-    io.flock(&lock_fd, FlockOperation::LockExclusive)?;
+    io.flock(lock_fd.as_ref(), FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)
 }

@@ -1,4 +1,4 @@
-use std::{io::IoSlice, os::fd::OwnedFd, sync::Arc};
+use std::{io::IoSlice, sync::Arc};
 
 use object_store::{
     Attributes, Error, ObjectMeta, PutMode, PutOptions, PutPayload, Result, UpdateVersion,
@@ -12,7 +12,7 @@ use crate::{
         MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
     },
     error::IOErrorExt,
-    io::{IOBlock, spawn_io},
+    io::{IOBlock, IOFD, spawn_io},
     state::State,
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
@@ -20,7 +20,7 @@ use crate::{
 pub(crate) struct PreparedPutOperation {
     location: Path,
     file: String,
-    dir_fd: Arc<OwnedFd>,
+    dir_fd: Arc<dyn IOFD>,
     mode: PutMode,
     attributes: Attributes,
 }
@@ -71,7 +71,7 @@ impl PreparedPutOperation {
 
         let file_fd = io
             .openat2(
-                &dir_fd,
+                dir_fd.as_ref(),
                 ".",
                 OFLAGS_FILE_CREATE,
                 MODE_FILE_CREATE,
@@ -81,7 +81,7 @@ impl PreparedPutOperation {
 
         for (attr, attr_val) in attributes.iter() {
             io.fsetxattr(
-                &file_fd,
+                file_fd.as_ref(),
                 &attr_to_xattr(attr)?,
                 attr_val.as_bytes(),
                 XattrFlags::CREATE,
@@ -101,8 +101,8 @@ impl PreparedPutOperation {
 
 #[derive(Debug)]
 pub(crate) struct RunningPutOperation {
-    file_fd: OwnedFd,
-    dir_fd: Arc<OwnedFd>,
+    file_fd: Box<dyn IOFD>,
+    dir_fd: Arc<dyn IOFD>,
     file: String,
     location: Path,
     mode: PutMode,
@@ -125,7 +125,7 @@ impl RunningPutOperation {
         let mut offset = start_offset;
         while offset < start_offset + len {
             let written = io
-                .pwritev2(file_fd, &slices, offset as _, READ_WRITE_FLAGS)
+                .pwritev2(file_fd.as_ref(), &slices, offset as _, READ_WRITE_FLAGS)
                 .into_other_err()?;
             offset += written;
             IoSlice::advance_slices(&mut &mut slices[..], written);
@@ -143,17 +143,23 @@ impl RunningPutOperation {
             mode,
         } = self;
 
-        io.fsync(&file_fd).into_other_err()?;
+        io.fsync(file_fd.as_ref()).into_other_err()?;
 
-        let lock_fd = flock_dir(io, &dir_fd).into_other_err()?;
+        let lock_fd = flock_dir(io, dir_fd.as_ref()).into_other_err()?;
 
         match mode {
             PutMode::Overwrite => {
-                link_at_replace(io, &file_fd, &dir_fd, &file).into_other_err()?;
+                link_at_replace(io, file_fd.as_ref(), dir_fd.as_ref(), &file).into_other_err()?;
             }
             PutMode::Create => {
-                io.linkat(&file_fd, "", &dir_fd, &file, AtFlags::EMPTY_PATH)
-                    .into_put_err(&location)?;
+                io.linkat(
+                    file_fd.as_ref(),
+                    "",
+                    dir_fd.as_ref(),
+                    &file,
+                    AtFlags::EMPTY_PATH,
+                )
+                .into_put_err(&location)?;
             }
             PutMode::Update(UpdateVersion { e_tag, version }) => {
                 let Some(e_tag) = e_tag else {
@@ -170,10 +176,16 @@ impl RunningPutOperation {
                 }
 
                 let existing_fd = io
-                    .openat2(&dir_fd, &file, OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)
+                    .openat2(
+                        dir_fd.as_ref(),
+                        &file,
+                        OFLAGS_READ,
+                        Mode::empty(),
+                        RESOLVE_FLAGS,
+                    )
                     .into_update_err(&location)?;
 
-                let existing_stat = io.fstat(&existing_fd).into_get_err(&location)?;
+                let existing_stat = io.fstat(existing_fd.as_ref()).into_get_err(&location)?;
                 let existing_meta = stat_to_meta(existing_stat, location.clone())?;
                 let existing_etag = existing_meta
                     .e_tag
@@ -186,12 +198,12 @@ impl RunningPutOperation {
                     });
                 }
 
-                link_at_replace(io, &file_fd, &dir_fd, &file).into_other_err()?;
+                link_at_replace(io, file_fd.as_ref(), dir_fd.as_ref(), &file).into_other_err()?;
             }
         }
-        io.fsync(&dir_fd).into_other_err()?;
+        io.fsync(dir_fd.as_ref()).into_other_err()?;
 
-        let stat = io.fstat(&file_fd).into_get_err(&location)?;
+        let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
         let meta = stat_to_meta(stat, location)?;
 
         drop(file_fd);

@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     io::ErrorKind,
-    os::fd::OwnedFd,
     path::PathBuf,
     sync::Arc,
 };
@@ -13,14 +12,14 @@ use crate::{
     LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    io::{IOBlock, IOMutex, spawn_io},
+    io::{IOBlock, IOFD, IOMutex, spawn_io},
     utils::{OpenDirMode, open_dir_fd},
 };
 
 #[derive(Debug)]
 pub(crate) struct State {
     root: PathBuf,
-    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<OwnedFd>>>,
+    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<dyn IOFD>>>,
     options: LinuxFSOptions,
 }
 
@@ -39,7 +38,7 @@ impl State {
             root: root.clone(),
             dir_fd_cache: IOMutex::new(
                 &options.io_layer,
-                HashMap::from([(root, Arc::new(root_fd))]),
+                HashMap::from([(root, Arc::from(root_fd))]),
             ),
             options,
         })
@@ -50,7 +49,7 @@ impl State {
         io: &mut dyn IOBlock,
         dirs: impl Iterator<Item = Result<&'a str>>,
         mode: OpenDirMode,
-    ) -> Result<Arc<OwnedFd>> {
+    ) -> Result<Arc<dyn IOFD>> {
         let mut dir_fd_cache = self.dir_fd_cache.lock(io);
         let mut path = self.root.clone();
         let mut prefix = Path::ROOT;
@@ -66,7 +65,7 @@ impl State {
                 Entry::Vacant(v) => {
                     if mode == OpenDirMode::Put {
                         // try to create dir
-                        match io.mkdirat(&dir_fd, part, MODE_DIR_CREATE) {
+                        match io.mkdirat(dir_fd.as_ref(), part, MODE_DIR_CREATE) {
                             Ok(()) => {}
                             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                                 // race
@@ -77,7 +76,7 @@ impl State {
                         }
                     }
 
-                    let sub_fd_res = open_dir_fd(io, &dir_fd, part);
+                    let sub_fd_res = open_dir_fd(io, dir_fd.as_ref(), part);
                     let sub_fd = match mode {
                         OpenDirMode::Get => sub_fd_res.into_get_err(&prefix)?,
                         OpenDirMode::Put => sub_fd_res.into_other_err()?,

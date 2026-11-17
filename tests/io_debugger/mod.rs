@@ -3,13 +3,12 @@ use std::{
     cell::Cell,
     fmt::Write,
     mem::MaybeUninit,
-    os::unix::prelude::OwnedFd,
     sync::{Arc, Mutex},
 };
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    IOBlock, IOBlockPrepared, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer,
+    IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer,
 };
 use rustix::io::Errno;
 use uuid::Uuid;
@@ -38,6 +37,7 @@ where
 struct State {
     log: Vec<LogEntry>,
     block_counter: u64,
+    fd_counter: u64,
     guard_counter: u64,
     lock_counter: u64,
     uuid_counter: u128,
@@ -203,112 +203,151 @@ impl Drop for DebugIOBlock {
 impl IOBlock for DebugIOBlock {
     fn fgetxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "fgetxattr",
             args: IndexMap::from([
-                ("fd", Value::Ellipsis),
+                ("fd", Value::ID("fd", fd.id)),
                 ("name", Value::String(name.to_owned())),
                 ("value", Value::Ellipsis),
             ]),
-            f: |inner, _| inner.fgetxattr(fd, name, value),
+            f: |inner, _| inner.fgetxattr(fd.inner.as_ref(), name, value),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
-    fn fgetxattr_query(&mut self, fd: &OwnedFd, name: &str) -> Result<usize, Errno> {
+    fn fgetxattr_query(&mut self, fd: &dyn IOFD, name: &str) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "fgetxattr_query",
             args: IndexMap::from([
-                ("fd", Value::Ellipsis),
+                ("fd", Value::ID("fd", fd.id)),
                 ("name", Value::String(name.to_owned())),
             ]),
-            f: |inner, _| inner.fgetxattr_query(fd, name),
+            f: |inner, _| inner.fgetxattr_query(fd.inner.as_ref(), name),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
     fn flistxattr<'a>(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         list: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "flistxattr",
-            args: IndexMap::from([("fd", Value::Ellipsis), ("list", Value::Ellipsis)]),
-            f: |inner, _| inner.flistxattr(fd, list),
+            args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("list", Value::Ellipsis)]),
+            f: |inner, _| inner.flistxattr(fd.inner.as_ref(), list),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
-    fn flistxattr_query(&mut self, fd: &OwnedFd) -> Result<usize, Errno> {
+    fn flistxattr_query(&mut self, fd: &dyn IOFD) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "flistxattr_query",
-            args: IndexMap::from([("fd", Value::Ellipsis)]),
-            f: |inner, _| inner.flistxattr_query(fd),
+            args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
+            f: |inner, _| inner.flistxattr_query(fd.inner.as_ref()),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
-    fn flock(&mut self, fd: &OwnedFd, operation: rustix::fs::FlockOperation) -> Result<(), Errno> {
+    fn flock(&mut self, fd: &dyn IOFD, operation: rustix::fs::FlockOperation) -> Result<(), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "flock",
-            args: IndexMap::from([("fd", Value::Ellipsis), ("operation", Value::Ellipsis)]),
-            f: |inner, _| inner.flock(fd, operation),
+            args: IndexMap::from([
+                ("fd", Value::ID("fd", fd.id)),
+                ("operation", Value::Ellipsis),
+            ]),
+            f: |inner, _| inner.flock(fd.inner.as_ref(), operation),
             map_ok: |()| Value::Unit,
         })
     }
 
-    fn fstat(&mut self, fd: &OwnedFd) -> Result<rustix::fs::Stat, Errno> {
+    fn fstat(&mut self, fd: &dyn IOFD) -> Result<rustix::fs::Stat, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "fstat",
-            args: IndexMap::from([("fd", Value::Ellipsis)]),
-            f: |inner, _| inner.fstat(fd),
+            args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
+            f: |inner, _| inner.fstat(fd.inner.as_ref()),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
     fn fsetxattr(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         name: &str,
         value: &[u8],
         flags: rustix::fs::XattrFlags,
     ) -> Result<(), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "fstat",
             args: IndexMap::from([
-                ("fd", Value::Ellipsis),
+                ("fd", Value::ID("fd", fd.id)),
                 ("name", Value::String(name.to_owned())),
                 ("value", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.fsetxattr(fd, name, value, flags),
+            f: |inner, _| inner.fsetxattr(fd.inner.as_ref(), name, value, flags),
             map_ok: |()| Value::Unit,
         })
     }
 
-    fn fsync(&mut self, fd: &OwnedFd) -> Result<(), Errno> {
+    fn fsync(&mut self, fd: &dyn IOFD) -> Result<(), Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "fsync",
-            args: IndexMap::from([("fd", Value::Ellipsis)]),
-            f: |inner, _| inner.fsync(fd),
+            args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
+            f: |inner, _| inner.fsync(fd.inner.as_ref()),
             map_ok: |()| Value::Unit,
         })
     }
 
     fn getdents(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, rustix::fs::FileType)>, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "getdents",
-            args: IndexMap::from([("fd", Value::Ellipsis), ("buf", Value::Ellipsis)]),
-            f: |inner, _| inner.getdents(fd, buf),
+            args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("buf", Value::Ellipsis)]),
+            f: |inner, _| inner.getdents(fd.inner.as_ref(), buf),
             map_ok: |_| Value::Ellipsis,
         })
     }
@@ -340,40 +379,59 @@ impl IOBlock for DebugIOBlock {
 
     fn linkat(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<(), Errno> {
+        let old_dirfd = (old_dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+        let new_dirfd = (new_dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "linkat",
             args: IndexMap::from([
-                ("old_dirfd", Value::Ellipsis),
+                ("old_dirfd", Value::ID("fd", old_dirfd.id)),
                 ("old_path", Value::String(old_path.to_owned())),
-                ("new_dirfd", Value::Ellipsis),
+                ("new_dirfd", Value::ID("fd", new_dirfd.id)),
                 ("new_path", Value::String(new_path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.linkat(old_dirfd, old_path, new_dirfd, new_path, flags),
+            f: |inner, _| {
+                inner.linkat(
+                    old_dirfd.inner.as_ref(),
+                    old_path,
+                    new_dirfd.inner.as_ref(),
+                    new_path,
+                    flags,
+                )
+            },
             map_ok: |()| Value::Unit,
         })
     }
 
     fn mkdirat(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         mode: rustix::fs::Mode,
     ) -> Result<(), Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "mkdirat",
             args: IndexMap::from([
-                ("dirfd", Value::Ellipsis),
+                ("dirfd", Value::ID("fd", dirfd.id)),
                 ("path", Value::String(path.to_owned())),
                 ("mode", Value::flags(mode)),
             ]),
-            f: |inner, _| inner.mkdirat(dirfd, path, mode),
+            f: |inner, _| inner.mkdirat(dirfd.inner.as_ref(), path, mode),
             map_ok: |()| Value::Unit,
         })
     }
@@ -383,7 +441,9 @@ impl IOBlock for DebugIOBlock {
         path: &std::path::Path,
         flags: rustix::fs::OFlags,
         mode: rustix::fs::Mode,
-    ) -> Result<OwnedFd, Errno> {
+    ) -> Result<Box<dyn IOFD>, Errno> {
+        let state_arc = Arc::clone(&self.state);
+
         self.event(Event {
             fun: "open",
             args: IndexMap::from([
@@ -391,127 +451,201 @@ impl IOBlock for DebugIOBlock {
                 ("flags", Value::flags(flags)),
                 ("mode", Value::flags(mode)),
             ]),
-            f: |inner, _| inner.open(path, flags, mode),
-            map_ok: |_| Value::Ellipsis,
+            f: |inner, state| {
+                let inner = inner.open(path, flags, mode)?;
+
+                let id = state.fd_counter;
+                state.fd_counter += 1;
+
+                Ok(Box::new(DebugIOFD {
+                    inner,
+                    id,
+                    state: state_arc,
+                }) as Box<dyn IOFD>)
+            },
+            map_ok: |fd| {
+                Value::ID(
+                    "fd",
+                    (fd.as_ref() as &dyn Any)
+                        .downcast_ref::<DebugIOFD>()
+                        .expect("just created that type")
+                        .id,
+                )
+            },
         })
     }
 
     fn openat2(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         oflags: rustix::fs::OFlags,
         mode: rustix::fs::Mode,
         resolve: rustix::fs::ResolveFlags,
-    ) -> Result<OwnedFd, Errno> {
+    ) -> Result<Box<dyn IOFD>, Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+        let state_arc = Arc::clone(&self.state);
+
         self.event(Event {
             fun: "openat2",
             args: IndexMap::from([
-                ("dirfd", Value::Ellipsis),
+                ("dirfd", Value::ID("fd", dirfd.id)),
                 ("path", Value::String(path.to_owned())),
                 ("oflags", Value::flags(oflags)),
                 ("mode", Value::flags(mode)),
                 ("resolve", Value::flags(resolve)),
             ]),
-            f: |inner, _| inner.openat2(dirfd, path, oflags, mode, resolve),
-            map_ok: |_| Value::Ellipsis,
+            f: |inner, state| {
+                let inner = inner.openat2(dirfd.inner.as_ref(), path, oflags, mode, resolve)?;
+
+                let id = state.fd_counter;
+                state.fd_counter += 1;
+
+                Ok(Box::new(DebugIOFD {
+                    inner,
+                    id,
+                    state: state_arc,
+                }) as Box<dyn IOFD>)
+            },
+            map_ok: |fd| {
+                Value::ID(
+                    "fd",
+                    (fd.as_ref() as &dyn Any)
+                        .downcast_ref::<DebugIOFD>()
+                        .expect("just created that type")
+                        .id,
+                )
+            },
         })
     }
 
     fn preadv2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &mut [std::io::IoSliceMut<'_>],
         offset: u64,
         flags: rustix::io::ReadWriteFlags,
     ) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "pread2",
             args: IndexMap::from([
-                ("fd", Value::Ellipsis),
+                ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),
                 ("offset", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.preadv2(fd, bufs, offset, flags),
+            f: |inner, _| inner.preadv2(fd.inner.as_ref(), bufs, offset, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
     fn pwritev2(
         &mut self,
-        fd: &OwnedFd,
+        fd: &dyn IOFD,
         bufs: &[std::io::IoSlice<'_>],
         offset: u64,
         flags: rustix::io::ReadWriteFlags,
     ) -> Result<usize, Errno> {
+        let fd = (fd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "pwrite2",
             args: IndexMap::from([
-                ("fd", Value::Ellipsis),
+                ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),
                 ("offset", Value::Ellipsis),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.pwritev2(fd, bufs, offset, flags),
+            f: |inner, _| inner.pwritev2(fd.inner.as_ref(), bufs, offset, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
     fn renameat2(
         &mut self,
-        old_dirfd: &OwnedFd,
+        old_dirfd: &dyn IOFD,
         old_path: &str,
-        new_dirfd: &OwnedFd,
+        new_dirfd: &dyn IOFD,
         new_path: &str,
         flags: rustix::fs::RenameFlags,
     ) -> Result<(), Errno> {
+        let old_dirfd = (old_dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+        let new_dirfd = (new_dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "renameat2",
             args: IndexMap::from([
-                ("old_dirfd", Value::Ellipsis),
+                ("old_dirfd", Value::ID("fd", old_dirfd.id)),
                 ("old_path", Value::String(old_path.to_owned())),
-                ("new_dirfd", Value::Ellipsis),
+                ("new_dirfd", Value::ID("fd", new_dirfd.id)),
                 ("new_path", Value::String(new_path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.renameat2(old_dirfd, old_path, new_dirfd, new_path, flags),
+            f: |inner, _| {
+                inner.renameat2(
+                    old_dirfd.inner.as_ref(),
+                    old_path,
+                    new_dirfd.inner.as_ref(),
+                    new_path,
+                    flags,
+                )
+            },
             map_ok: |()| Value::Unit,
         })
     }
 
     fn statat(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<rustix::fs::Stat, Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "statat",
             args: IndexMap::from([
-                ("dirfd", Value::Ellipsis),
+                ("dirfd", Value::ID("fd", dirfd.id)),
                 ("path", Value::String(path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.statat(dirfd, path, flags),
+            f: |inner, _| inner.statat(dirfd.inner.as_ref(), path, flags),
             map_ok: |_| Value::Ellipsis,
         })
     }
 
     fn unlinkat(
         &mut self,
-        dirfd: &OwnedFd,
+        dirfd: &dyn IOFD,
         path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<(), Errno> {
+        let dirfd = (dirfd as &dyn Any)
+            .downcast_ref::<DebugIOFD>()
+            .expect("wrong type");
+
         self.event(Event {
             fun: "unlinkat",
             args: IndexMap::from([
-                ("dirfd", Value::Ellipsis),
+                ("dirfd", Value::ID("fd", dirfd.id)),
                 ("path", Value::String(path.to_owned())),
                 ("flags", Value::flags(flags)),
             ]),
-            f: |inner, _| inner.unlinkat(dirfd, path, flags),
+            f: |inner, _| inner.unlinkat(dirfd.inner.as_ref(), path, flags),
             map_ok: |()| Value::Unit,
         })
     }
@@ -570,6 +704,7 @@ impl IORawMutex for DebugIORawMutex {
         let dbg_guard = (guard as Box<dyn Any>)
             .downcast::<DebugIORawMutexGuard>()
             .expect("wrong type");
+
         let mut guard2 = self.state.lock().unwrap();
 
         // SAFETY: caller
@@ -599,3 +734,29 @@ struct DebugIORawMutexGuard {
 }
 
 impl IORawMutexGuard for DebugIORawMutexGuard {}
+
+#[derive(Debug)]
+struct DebugIOFD {
+    inner: Box<dyn IOFD>,
+    id: u64,
+    state: Arc<Mutex<State>>,
+}
+
+impl Drop for DebugIOFD {
+    fn drop(&mut self) {
+        let mut guard = self.state.lock().unwrap();
+
+        let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
+        let block_id = SYNC_BLOCK_ID.get();
+
+        guard.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "close",
+            args: IndexMap::from([("fd", Value::ID("fd", self.id))]),
+            res: Ok(Value::Unit),
+        });
+    }
+}
+
+impl IOFD for DebugIOFD {}
