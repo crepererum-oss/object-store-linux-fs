@@ -324,7 +324,14 @@ impl NextTask {
                                     .await?;
 
                                 if let Some(meta) = maybe_stat
-                                    .map(|stat| stat_to_meta(stat, child_path))
+                                    .and_then(|stat| match stat_to_meta(stat, child_path) {
+                                        Ok(meta) => Some(Ok(meta)),
+                                        Err(Error::NotFound { .. }) => {
+                                            // file became a directory, ignore it
+                                            None
+                                        }
+                                        Err(e) => Some(Err(e)),
+                                    })
                                     .transpose()?
                                 {
                                     metas.push(meta);

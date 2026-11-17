@@ -1,11 +1,12 @@
 use std::{assert_matches, sync::Arc};
 
+use futures_util::TryStreamExt;
 use object_store::{
     Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
-use crate::io_debugger::{DebugIOLayer, order::Matcher, with_task_id};
+use crate::io_debugger::{DebugIOLayer, log::Value, order::Matcher, with_task_id};
 
 mod io_debugger;
 
@@ -146,4 +147,71 @@ async fn race_put_create() {
     );
 
     println!("{log}");
+}
+
+#[tokio::test]
+async fn race_list_file_becomes_directory() {
+    let path = tempfile::tempdir().unwrap();
+    let debugger = Arc::new(
+        DebugIOLayer::new().with_order(
+            [
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("getdents"),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(3),
+                    fun: Some("unlinkat"),
+                    args: [("path", Value::String("x".to_owned()))].into(),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(3),
+                    fun: Some("mkdirat"),
+                    args: [("path", Value::String("x".to_owned()))].into(),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("statat"),
+                    args: [("path", Value::String("x".to_owned()))].into(),
+                    ..Default::default()
+                },
+            ]
+            .into(),
+        ),
+    );
+    let storage = LinuxFS::new(
+        path.path().to_path_buf(),
+        LinuxFSOptions {
+            io_layer: Arc::clone(&debugger) as _,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let loc = Path::from("x");
+    storage.put(&loc, Default::default()).await.unwrap();
+
+    debugger.wipe_log();
+
+    let list = with_task_id(2, storage.list(None).try_collect::<Vec<_>>());
+    let replace = with_task_id(3, async {
+        storage.delete(&loc).await.unwrap();
+        storage
+            .put(&Path::from("x/y"), Default::default())
+            .await
+            .unwrap();
+    });
+    let (result, ()) = tokio::join!(list, replace);
+
+    // No snapshot is required, but a vanished object must not abort traversal.
+    assert!(
+        result.is_ok(),
+        "listing failed: {result:?}\n{}",
+        debugger.log()
+    );
+    assert!(result.unwrap().is_empty());
 }
