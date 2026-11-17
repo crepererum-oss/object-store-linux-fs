@@ -9,7 +9,9 @@ use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, RenameFlags, Stat};
 
 use crate::{
     constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME},
+    error::IOErrorExt,
     io::{IOBlock, IOFD},
+    state::State,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +27,17 @@ pub(crate) fn split_dirs_and_filename<'a>(
     location: &'a Path,
     mode: OpenDirMode,
 ) -> Result<(DirsIt<'a>, &'a str)> {
-    let (dirs, filename) = split_dirs_and_filename_str(location);
+    let (dirs_str, filename) = split_dirs_and_filename_str(location);
+    process_dirs_and_filename(dirs_str, filename, location, mode)
+}
 
-    let dirs = match dirs {
+fn process_dirs_and_filename<'a>(
+    dirs_str: Option<&'a str>,
+    filename: &'a str,
+    location: &'a Path,
+    mode: OpenDirMode,
+) -> Result<(DirsIt<'a>, &'a str)> {
+    let dirs = match dirs_str {
         Some(dirs) => Box::new(dirs.split(DELIMITER_CHAR).map(move |s| {
             check_staging_prefix(s, mode, location)?;
             Ok(s)
@@ -54,12 +64,6 @@ fn check_staging_prefix(filename: &str, mode: OpenDirMode, location: &Path) -> R
     } else {
         Ok(())
     }
-}
-
-pub(crate) fn same_dir(loc1: &Path, loc2: &Path) -> bool {
-    let (dirs1, _) = split_dirs_and_filename_str(loc1);
-    let (dirs2, _) = split_dirs_and_filename_str(loc2);
-    dirs1 == dirs2
 }
 
 fn split_dirs_and_filename_str(location: &Path) -> (Option<&str>, &str) {
@@ -174,4 +178,80 @@ pub(crate) fn flock_dir(
     io.flock(lock_fd.as_ref(), FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)
+}
+
+pub(crate) struct TransferFDs<'a> {
+    pub(crate) from_dir_fd: Arc<dyn IOFD>,
+    pub(crate) from_lock_fd: Option<Box<dyn IOFD>>,
+    pub(crate) from_file: &'a str,
+    pub(crate) to_dir_fd: Arc<dyn IOFD>,
+    pub(crate) to_lock_fd: Option<Box<dyn IOFD>>,
+    pub(crate) to_file: &'a str,
+}
+
+pub(crate) fn prepare_transfer_dirs<'a>(
+    io: &mut dyn IOBlock,
+    from: &'a Path,
+    to: &'a Path,
+    state: &State,
+) -> Result<TransferFDs<'a>, Error> {
+    let (from_dirs_str, from_file) = split_dirs_and_filename_str(from);
+    let (to_dirs_str, to_file) = split_dirs_and_filename_str(to);
+
+    let (from_dirs, from_file) =
+        process_dirs_and_filename(from_dirs_str, from_file, from, OpenDirMode::Get)?;
+    let (to_dirs, to_file) = process_dirs_and_filename(to_dirs_str, to_file, to, OpenDirMode::Put)?;
+
+    match from_dirs_str.cmp(&to_dirs_str) {
+        std::cmp::Ordering::Less => {
+            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
+            let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
+
+            let from_lock_fd = Some(flock_dir(io, from_dir_fd.as_ref()).into_other_err()?);
+            let to_lock_fd = Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?);
+
+            Ok(TransferFDs {
+                from_dir_fd,
+                from_lock_fd,
+                from_file,
+                to_dir_fd,
+                to_lock_fd,
+                to_file,
+            })
+        }
+        std::cmp::Ordering::Equal => {
+            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
+            let to_dir_fd = Arc::clone(&from_dir_fd);
+
+            // don't lock twice!
+            let from_lock_fd = Some(flock_dir(io, from_dir_fd.as_ref()).into_other_err()?);
+            let to_lock_fd = None;
+
+            Ok(TransferFDs {
+                from_dir_fd,
+                from_lock_fd,
+                from_file,
+                to_dir_fd,
+                to_lock_fd,
+                to_file,
+            })
+        }
+        std::cmp::Ordering::Greater => {
+            // flip order of operations
+            let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
+            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
+
+            let to_lock_fd = Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?);
+            let from_lock_fd = Some(flock_dir(io, from_dir_fd.as_ref()).into_other_err()?);
+
+            Ok(TransferFDs {
+                from_dir_fd,
+                from_lock_fd,
+                from_file,
+                to_dir_fd,
+                to_lock_fd,
+                to_file,
+            })
+        }
+    }
 }

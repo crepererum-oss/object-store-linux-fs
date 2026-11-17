@@ -392,3 +392,69 @@ async fn race_source_overwrite(rename: bool) {
         b"new",
     );
 }
+
+#[tokio::test]
+async fn race_copy_opposite_directories() {
+    race_transfer_opposite_directories(false).await;
+}
+
+#[tokio::test]
+async fn race_rename_opposite_directories() {
+    race_transfer_opposite_directories(true).await;
+}
+
+async fn race_transfer_opposite_directories(rename: bool) {
+    let from_a = Path::from("a/x");
+    let from_b = Path::from("b/y");
+
+    let fixture = Fixture::new(
+        [
+            Matcher {
+                task_id: Some(2),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+        ],
+        async |storage| {
+            storage.put(&from_a, Default::default()).await.unwrap();
+            storage.put(&from_b, Default::default()).await.unwrap();
+        },
+    )
+    .await;
+
+    let to_b = Path::from("b/x");
+    let to_a = Path::from("a/y");
+    let (a, b) = tokio::join!(
+        with_task_id(2, async {
+            if rename {
+                fixture.storage.rename(&from_a, &to_b).await
+            } else {
+                fixture.storage.copy(&from_a, &to_b).await
+            }
+        }),
+        with_task_id(3, async {
+            if rename {
+                fixture.storage.rename(&from_b, &to_a).await
+            } else {
+                fixture.storage.copy(&from_b, &to_a).await
+            }
+        }),
+    );
+    a.unwrap();
+    b.unwrap();
+}

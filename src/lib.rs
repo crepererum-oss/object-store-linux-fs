@@ -19,7 +19,8 @@ use crate::{
     put::{PreparedPutOperation, RunningPutOperation},
     state::State,
     utils::{
-        OpenDirMode, flock_dir, link_at_replace, same_dir, split_dirs_and_filename, stat_to_meta,
+        OpenDirMode, TransferFDs, flock_dir, link_at_replace, prepare_transfer_dirs,
+        split_dirs_and_filename, stat_to_meta,
     },
 };
 
@@ -332,27 +333,16 @@ impl ObjectStore for LinuxFS {
         let to = to.clone();
 
         spawn_io(&self.state.options().io_layer, move |io| {
-            let (from_dirs, from_file) = split_dirs_and_filename(&from, OpenDirMode::Get)?;
-            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
-
-            let (to_dir_fd, to_file) = if same_dir(&from, &to) {
-                let (_to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
-                (Arc::clone(&from_dir_fd), to_file)
-            } else {
-                let (to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
-                let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
-                (to_dir_fd, to_file)
-            };
-
             // flock BEFORE reading file because the source file might move under us and we cannot relink/rematerialize
             // it incl. metadata and attributes otherwise
-            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
-            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
-                // don't lock the same directory twice! (deadlock)
-                None
-            } else {
-                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
-            };
+            let TransferFDs {
+                from_dir_fd,
+                from_lock_fd: _from_lock_fd,
+                from_file,
+                to_dir_fd,
+                to_lock_fd: _to_lock_fd,
+                to_file,
+            } = prepare_transfer_dirs(io, &from, &to, &state)?;
 
             let file_fd = io
                 .openat2(
@@ -402,27 +392,16 @@ impl ObjectStore for LinuxFS {
         let to = to.clone();
 
         spawn_io(&self.state.options().io_layer, move |io| {
-            let (from_dirs, from_file) = split_dirs_and_filename(&from, OpenDirMode::Get)?;
-            let from_dir_fd = state.open_dir(io, from_dirs, OpenDirMode::Get)?;
-
-            let (to_dir_fd, to_file) = if same_dir(&from, &to) {
-                let (_to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
-                (Arc::clone(&from_dir_fd), to_file)
-            } else {
-                let (to_dirs, to_file) = split_dirs_and_filename(&to, OpenDirMode::Put)?;
-                let to_dir_fd = state.open_dir(io, to_dirs, OpenDirMode::Put)?;
-                (to_dir_fd, to_file)
-            };
-
             // flock BEFORE reading file because the source file might move under us and we cannot relink/rematerialize
             // it incl. metadata and attributes otherwise
-            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
-            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
-                // don't lock the same directory twice! (deadlock)
-                None
-            } else {
-                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
-            };
+            let TransferFDs {
+                from_dir_fd,
+                from_lock_fd: _from_lock_fd,
+                from_file,
+                to_dir_fd,
+                to_lock_fd: _to_lock_fd,
+                to_file,
+            } = prepare_transfer_dirs(io, &from, &to, &state)?;
 
             let file_fd = io
                 .openat2(
