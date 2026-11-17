@@ -362,7 +362,7 @@ impl ObjectStore for LinuxFS {
             match mode {
                 CopyMode::Overwrite => {
                     link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_other_err()?;
+                        .into_transfer_err(&from, &to)?;
                 }
                 CopyMode::Create => {
                     io.linkat(
@@ -372,7 +372,7 @@ impl ObjectStore for LinuxFS {
                         to_file,
                         AtFlags::EMPTY_PATH,
                     )
-                    .into_put_err(to)?;
+                    .into_transfer_err(&from, &to)?;
                 }
             }
             io.fsync(to_dir_fd.as_ref()).into_other_err()?;
@@ -430,7 +430,7 @@ impl ObjectStore for LinuxFS {
             match target_mode {
                 RenameTargetMode::Overwrite => {
                     link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_other_err()?;
+                        .into_transfer_err(&from, &to)?;
                 }
                 RenameTargetMode::Create => {
                     io.linkat(
@@ -440,7 +440,7 @@ impl ObjectStore for LinuxFS {
                         to_file,
                         AtFlags::EMPTY_PATH,
                     )
-                    .into_put_err(to)?;
+                    .into_transfer_err(&from, &to)?;
                 }
             }
             io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())

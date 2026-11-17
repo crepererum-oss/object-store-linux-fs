@@ -215,3 +215,95 @@ async fn race_list_file_becomes_directory() {
     );
     assert!(result.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn race_copy_source_overwrite() {
+    race_source_overwrite(false).await;
+}
+
+#[tokio::test]
+async fn race_rename_source_overwrite() {
+    race_source_overwrite(true).await;
+}
+
+async fn race_source_overwrite(rename: bool) {
+    let path = tempfile::tempdir().unwrap();
+    let debugger = Arc::new(
+        DebugIOLayer::new().with_order(
+            [
+                // Pin the old inode, replace its last link, then try to publish it.
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("openat2"),
+                    args: [("path", Value::String("x".to_owned()))].into(),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(3),
+                    fun: Some("renameat2"),
+                    args: [("new_path", Value::String("x".to_owned()))].into(),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("flock"),
+                    ..Default::default()
+                },
+            ]
+            .into(),
+        ),
+    );
+    let storage = LinuxFS::new(
+        path.path().to_path_buf(),
+        LinuxFSOptions {
+            io_layer: Arc::clone(&debugger) as _,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let from = Path::from("x");
+    let to = Path::from("y");
+
+    storage
+        .put(&from, PutPayload::from_static(b"old"))
+        .await
+        .unwrap();
+    debugger.wipe_log();
+
+    let transfer = with_task_id(2, async {
+        if rename {
+            storage.rename(&from, &to).await
+        } else {
+            storage.copy(&from, &to).await
+        }
+    });
+    let overwrite = with_task_id(3, async {
+        storage
+            .put(&from, PutPayload::from_static(b"new"))
+            .await
+            .unwrap();
+    });
+    let (result, ()) = tokio::join!(transfer, overwrite);
+
+    println!("{}", debugger.log());
+
+    let err = result.unwrap_err();
+    assert_matches!(err, Error::NotFound { .. });
+
+    assert_eq!(
+        storage
+            .get(&from)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"new",
+    );
+
+    let err = storage.get(&to).await.unwrap_err();
+    assert_matches!(err, Error::NotFound { .. });
+}
