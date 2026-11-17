@@ -35,6 +35,7 @@ async fn simple_put() {
     T0 B1 fsync(fd: ...) -> Ok(())
     T0 B1 openat2(dirfd: ..., path: ".", oflags: ..., mode: ..., resolve: ...) -> Ok(...)
     T0 B1 flock(fd: ..., operation: ...) -> Ok(())
+    T0 B1 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
     T0 B1 linkat(old_dirfd: ..., old_path: "", new_dirfd: ..., new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: ...) -> Ok(())
     T0 B1 renameat2(old_dirfd: ..., old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: ..., new_path: "x", flags: ...) -> Ok(())
     T0 B1 fsync(fd: ...) -> Ok(())
