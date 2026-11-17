@@ -15,6 +15,7 @@ tokio = { version = "1.54.1", features = ["rt", "sync"] }
 uuid = { version = "1.29.2", default-features = false, features = ["v4"] }
 
 [dev-dependencies]
+bitflags = "2.13.2"
 indexmap = "2.14.2"
 insta = "1.49.0"
 object_store = { version = "0.14.0", default-features = false, features = ["integration"] }
