@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    cell::Cell,
     fmt::Write,
     mem::MaybeUninit,
     os::unix::prelude::OwnedFd,
@@ -7,13 +8,31 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use object_store_linux_fs::io::{IOBlock, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer};
+use object_store_linux_fs::io::{
+    IOBlock, IOBlockPrepared, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer,
+};
 use rustix::io::Errno;
 use uuid::Uuid;
 
 use crate::io_debugger::log::{LogEntry, Value};
 
 pub mod log;
+
+tokio::task_local! {
+    static ASYNC_TASK_ID: u64;
+}
+
+thread_local! {
+    static SYNC_TASK_ID: Cell<Option<u64>> = const {Cell::new(None)};
+    static SYNC_BLOCK_ID: Cell<Option<u64>> = const {Cell::new(None)};
+}
+
+pub async fn with_task_id<Fut>(task_id: u64, fut: Fut) -> Fut::Output
+where
+    Fut: Future,
+{
+    ASYNC_TASK_ID.scope(task_id, fut).await
+}
 
 #[derive(Debug, Default)]
 struct State {
@@ -49,24 +68,16 @@ impl DebugIOLayer {
 }
 
 impl IOLayer for DebugIOLayer {
-    fn start_block(&self) -> Box<dyn IOBlock> {
+    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
         let mut guard = self.state.lock().unwrap();
 
-        let task_id = 0; // TODO
+        let task_id = ASYNC_TASK_ID.try_get().ok();
 
         let block_id = guard.block_counter;
         guard.block_counter += 1;
 
-        guard.log.push(LogEntry {
-            task_id,
-            block_id,
-            fun: "block-start",
-            args: IndexMap::new(),
-            res: Ok(Value::Unit),
-        });
-
-        Box::new(DebugIOBlock {
-            inner: self.inner.start_block(),
+        Box::new(DebugIOBlockPrepared {
+            inner: Some(self.inner.prepare_block()),
             task_id,
             block_id,
             state: Arc::clone(&self.state),
@@ -80,8 +91,8 @@ impl IOLayer for DebugIOLayer {
         let id = guard.lock_counter;
         guard.lock_counter += 1;
 
-        let task_id = 0; // TODO
-        let block_id = 0; // TODO
+        let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
+        let block_id = SYNC_BLOCK_ID.get();
 
         guard.log.push(LogEntry {
             task_id,
@@ -99,9 +110,49 @@ impl IOLayer for DebugIOLayer {
     }
 }
 
+struct DebugIOBlockPrepared {
+    inner: Option<Box<dyn IOBlockPrepared>>,
+    task_id: Option<u64>,
+    block_id: u64,
+    state: Arc<Mutex<State>>,
+}
+
+impl IOBlockPrepared for DebugIOBlockPrepared {
+    fn start(&mut self) -> Box<dyn IOBlock> {
+        let Self {
+            inner,
+            task_id,
+            block_id,
+            state,
+        } = self;
+
+        let mut guard = state.lock().unwrap();
+
+        SYNC_TASK_ID.set(*task_id);
+        SYNC_BLOCK_ID.set(Some(*block_id));
+
+        guard.log.push(LogEntry {
+            task_id: task_id.as_ref().copied(),
+            block_id: Some(*block_id),
+            fun: "block-start",
+            args: IndexMap::new(),
+            res: Ok(Value::Unit),
+        });
+
+        let mut inner = inner.take().expect("not started");
+        let inner = inner.start();
+        Box::new(DebugIOBlock {
+            inner,
+            task_id: *task_id,
+            block_id: *block_id,
+            state: Arc::clone(state),
+        })
+    }
+}
+
 struct DebugIOBlock {
     inner: Box<dyn IOBlock>,
-    task_id: u64,
+    task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
 }
@@ -123,7 +174,7 @@ impl DebugIOBlock {
         let res = f(self.inner.as_mut(), &mut guard);
         guard.log.push(LogEntry {
             task_id: self.task_id,
-            block_id: self.block_id,
+            block_id: Some(self.block_id),
             fun,
             args,
             res: res.as_ref().map(map_ok).map_err(|e| *e),
@@ -135,9 +186,13 @@ impl DebugIOBlock {
 impl Drop for DebugIOBlock {
     fn drop(&mut self) {
         let mut guard = self.state.lock().unwrap();
+
+        SYNC_TASK_ID.set(None);
+        SYNC_BLOCK_ID.set(None);
+
         guard.log.push(LogEntry {
             task_id: self.task_id,
-            block_id: self.block_id,
+            block_id: Some(self.block_id),
             fun: "block-end",
             args: IndexMap::new(),
             res: Ok(Value::Unit),
@@ -497,9 +552,8 @@ impl Drop for DebugIORawMutex {
     fn drop(&mut self) {
         let mut guard = self.state.lock().unwrap();
 
-        // TODO
-        let task_id = 0;
-        let block_id = 0;
+        let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
+        let block_id = SYNC_BLOCK_ID.get();
 
         guard.log.push(LogEntry {
             task_id,
@@ -523,9 +577,8 @@ impl IORawMutex for DebugIORawMutex {
             self.inner.unlock(dbg_guard.inner);
         }
 
-        // TODO
-        let task_id = 0;
-        let block_id = 0;
+        let task_id = SYNC_TASK_ID.get();
+        let block_id = SYNC_BLOCK_ID.get();
 
         guard2.log.push(LogEntry {
             task_id,

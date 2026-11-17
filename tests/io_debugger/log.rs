@@ -67,8 +67,8 @@ impl std::fmt::Display for Value {
 
 #[derive(Debug)]
 pub struct LogEntry {
-    pub task_id: u64,
-    pub block_id: u64,
+    pub task_id: Option<u64>,
+    pub block_id: Option<u64>,
     pub fun: &'static str,
     pub args: IndexMap<&'static str, Value>,
     pub res: Result<Value, Errno>,
@@ -84,7 +84,21 @@ impl std::fmt::Display for LogEntry {
             res,
         } = self;
 
-        write!(f, "T{task_id} B{block_id} {fun}(")?;
+        write!(f, "T")?;
+        if let Some(task_id) = task_id {
+            write!(f, "{task_id}")?;
+        } else {
+            write!(f, "-")?;
+        }
+
+        write!(f, " B")?;
+        if let Some(block_id) = block_id {
+            write!(f, "{block_id}")?;
+        } else {
+            write!(f, "-")?;
+        }
+
+        write!(f, " {fun}(")?;
 
         for (idx, (name, val)) in args.iter().enumerate() {
             if idx > 0 {

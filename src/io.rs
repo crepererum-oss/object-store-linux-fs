@@ -24,11 +24,15 @@ use uuid::Uuid;
 use crate::constants::STORE_NAME;
 
 pub trait IOLayer: Debug + Send + Sync {
-    fn start_block(&self) -> Box<dyn IOBlock>;
+    fn prepare_block(&self) -> Box<dyn IOBlockPrepared>;
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
 }
 
-pub trait IOBlock: Send {
+pub trait IOBlockPrepared: Send {
+    fn start(&mut self) -> Box<dyn IOBlock>;
+}
+
+pub trait IOBlock {
     /// See <https://man.archlinux.org/man/core/man-pages/fgetxattr.2>.
     fn fgetxattr<'a>(
         &mut self,
@@ -178,8 +182,8 @@ struct RustixIORawLockGuard {
 impl IORawMutexGuard for RustixIORawLockGuard {}
 
 impl IOLayer for RustixIOLayer {
-    fn start_block(&self) -> Box<dyn IOBlock> {
-        Box::new(RustixIOBlock)
+    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
+        Box::new(RustixIOBlockPrepared)
     }
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
@@ -193,12 +197,20 @@ impl<T> IOLayer for Arc<T>
 where
     T: ?Sized + IOLayer,
 {
-    fn start_block(&self) -> Box<dyn IOBlock> {
-        self.as_ref().start_block()
+    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
+        self.as_ref().prepare_block()
     }
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
         self.as_ref().create_raw_mutex()
+    }
+}
+
+struct RustixIOBlockPrepared;
+
+impl IOBlockPrepared for RustixIOBlockPrepared {
+    fn start(&mut self) -> Box<dyn IOBlock> {
+        Box::new(RustixIOBlock)
     }
 }
 
@@ -398,20 +410,23 @@ where
     F: for<'a> FnOnce(&'a mut dyn IOBlock) -> Result<R, object_store::Error> + Send + 'static,
     R: Send + 'static,
 {
-    let mut block = io_layer.start_block();
+    let mut prepared = io_layer.prepare_block();
 
-    tokio::task::spawn_blocking(move || f(block.as_mut()))
-        .await
-        .map_err(|e| {
-            if e.is_panic() {
-                std::panic::resume_unwind(e.into_panic())
-            } else {
-                Error::Generic {
-                    store: STORE_NAME,
-                    source: Box::new(e),
-                }
+    tokio::task::spawn_blocking(move || {
+        let mut block = prepared.start();
+        f(block.as_mut())
+    })
+    .await
+    .map_err(|e| {
+        if e.is_panic() {
+            std::panic::resume_unwind(e.into_panic())
+        } else {
+            Error::Generic {
+                store: STORE_NAME,
+                source: Box::new(e),
             }
-        })?
+        }
+    })?
 }
 
 pub(crate) struct IOMutex<T> {
