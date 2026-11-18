@@ -135,7 +135,7 @@ impl ObjectStore for LinuxFS {
                 .into_get_err(&location)?;
 
             let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
-            let meta = stat_to_meta(stat, location.clone())?;
+            let meta = stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
             options.check_preconditions(&meta)?;
 
             let attributes = read_attrs_from_fd(io, file_fd.as_ref()).into_get_err(&location)?;
@@ -234,7 +234,7 @@ impl ObjectStore for LinuxFS {
                 .into_get_err(&location)?;
 
             let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
-            stat_to_meta(stat, location.clone())?;
+            stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
 
             let mut bytes_vec = Vec::with_capacity(ranges.len());
 
@@ -361,7 +361,7 @@ impl ObjectStore for LinuxFS {
                 .into_get_err(&from)?;
 
             let stat = io.fstat(file_fd.as_ref()).into_get_err(&from)?;
-            stat_to_meta(stat, from.clone())?;
+            stat_to_meta(stat, from.clone(), OpenDirMode::Get)?;
 
             match mode {
                 CopyMode::Overwrite => {
@@ -420,7 +420,7 @@ impl ObjectStore for LinuxFS {
                 .into_get_err(&from)?;
 
             let stat = io.fstat(file_fd.as_ref()).into_get_err(from.as_ref())?;
-            stat_to_meta(stat, from.clone())?;
+            stat_to_meta(stat, from.clone(), OpenDirMode::Get)?;
 
             match target_mode {
                 RenameTargetMode::Overwrite => {

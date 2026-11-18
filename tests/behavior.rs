@@ -474,3 +474,27 @@ async fn update_below_object_fails_precondition() {
         .unwrap_err();
     assert_matches!(err, Error::Precondition { .. });
 }
+
+#[tokio::test]
+async fn update_directory_fails_precondition() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    storage
+        .put(&Path::parse("x/y").unwrap(), Default::default())
+        .await
+        .unwrap();
+
+    let directory = Path::parse("x").unwrap();
+    let mode = PutMode::Update(UpdateVersion {
+        e_tag: Some("missing".to_owned()),
+        version: None,
+    });
+    let err = storage
+        .put_opts(&directory, Default::default(), mode.into())
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::Precondition { .. });
+}

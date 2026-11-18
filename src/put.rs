@@ -22,6 +22,7 @@ pub(crate) struct PreparedPutOperation {
     file: String,
     dir_fd: Arc<dyn IOFD>,
     mode: PutMode,
+    open_dir_mode: OpenDirMode,
     attributes: Attributes,
 }
 
@@ -56,6 +57,7 @@ impl PreparedPutOperation {
             file,
             dir_fd,
             mode,
+            open_dir_mode,
             attributes,
         })
     }
@@ -66,6 +68,7 @@ impl PreparedPutOperation {
             file,
             dir_fd,
             mode,
+            open_dir_mode,
             attributes,
         } = self;
 
@@ -101,6 +104,7 @@ impl PreparedPutOperation {
             file,
             location,
             mode,
+            open_dir_mode,
         })
     }
 }
@@ -112,6 +116,7 @@ pub(crate) struct RunningPutOperation {
     file: String,
     location: Path,
     mode: PutMode,
+    open_dir_mode: OpenDirMode,
 }
 
 impl RunningPutOperation {
@@ -149,6 +154,7 @@ impl RunningPutOperation {
             file,
             location,
             mode,
+            open_dir_mode,
         } = self;
 
         io.fsync(file_fd.as_ref()).into_other_err()?;
@@ -194,7 +200,7 @@ impl RunningPutOperation {
                     .into_update_err(&location)?;
 
                 let existing_stat = io.fstat(existing_fd.as_ref()).into_get_err(&location)?;
-                let existing_meta = stat_to_meta(existing_stat, location.clone())?;
+                let existing_meta = stat_to_meta(existing_stat, location.clone(), open_dir_mode)?;
                 let existing_etag = existing_meta
                     .e_tag
                     .expect("fs implementation always provides etag");
@@ -212,7 +218,7 @@ impl RunningPutOperation {
         io.fsync(dir_fd.as_ref()).into_other_err()?;
 
         let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
-        let meta = stat_to_meta(stat, location)?;
+        let meta = stat_to_meta(stat, location, open_dir_mode)?;
 
         drop(file_fd);
         drop(lock_fd);

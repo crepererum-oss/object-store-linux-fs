@@ -86,17 +86,26 @@ pub(crate) fn open_dir_fd(
     Ok(Arc::from(child_fd))
 }
 
-pub(crate) fn stat_to_meta(stat: Stat, location: Path) -> Result<ObjectMeta> {
+pub(crate) fn stat_to_meta(stat: Stat, location: Path, mode: OpenDirMode) -> Result<ObjectMeta> {
     // TODO: this is somewhat a hack because `O_REGULAR` does not exist (yet), see
     //       https://uapi-group.org/kernel-features/#ability-to-only-open-regular-files
     match FileType::from_raw_mode(stat.st_mode) {
         FileType::RegularFile => {}
-        FileType::Directory => {
-            return Err(Error::NotFound {
-                path: location.to_string(),
-                source: "is a directory".to_owned().into(),
-            });
-        }
+        FileType::Directory => match mode {
+            OpenDirMode::Get => {
+                return Err(Error::NotFound {
+                    path: location.to_string(),
+                    source: "is a directory".to_owned().into(),
+                });
+            }
+            OpenDirMode::Put => unreachable!(),
+            OpenDirMode::Update => {
+                return Err(Error::Precondition {
+                    path: location.to_string(),
+                    source: "is a directory".to_owned().into(),
+                });
+            }
+        },
         other => {
             return Err(Error::Generic {
                 store: STORE_NAME,
