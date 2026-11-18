@@ -344,6 +344,16 @@ impl ObjectStore for LinuxFS {
                 (to_dir_fd, to_file)
             };
 
+            // flock BEFORE reading file because the source file might move under us and we cannot relink/rematerialize
+            // it incl. metadata and attributes otherwise
+            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
+            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
+                // don't lock the same directory twice! (deadlock)
+                None
+            } else {
+                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
+            };
+
             let file_fd = io
                 .openat2(
                     from_dir_fd.as_ref(),
@@ -357,12 +367,10 @@ impl ObjectStore for LinuxFS {
             let stat = io.fstat(file_fd.as_ref()).into_get_err(&from)?;
             stat_to_meta(stat, from.clone())?;
 
-            let _to_lock_fd = flock_dir(io, to_dir_fd.as_ref()).into_other_err()?;
-
             match mode {
                 CopyMode::Overwrite => {
                     link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_transfer_err(&from, &to)?;
+                        .into_put_err(&to)?;
                 }
                 CopyMode::Create => {
                     io.linkat(
@@ -372,7 +380,7 @@ impl ObjectStore for LinuxFS {
                         to_file,
                         AtFlags::EMPTY_PATH,
                     )
-                    .into_transfer_err(&from, &to)?;
+                    .into_put_err(&to)?;
                 }
             }
             io.fsync(to_dir_fd.as_ref()).into_other_err()?;
@@ -406,6 +414,16 @@ impl ObjectStore for LinuxFS {
                 (to_dir_fd, to_file)
             };
 
+            // flock BEFORE reading file because the source file might move under us and we cannot relink/rematerialize
+            // it incl. metadata and attributes otherwise
+            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
+            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
+                // don't lock the same directory twice! (deadlock)
+                None
+            } else {
+                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
+            };
+
             let file_fd = io
                 .openat2(
                     from_dir_fd.as_ref(),
@@ -419,18 +437,10 @@ impl ObjectStore for LinuxFS {
             let stat = io.fstat(file_fd.as_ref()).into_get_err(from.as_ref())?;
             stat_to_meta(stat, from.clone())?;
 
-            let _from_lock_fd = flock_dir(io, from_dir_fd.as_ref()).into_other_err()?;
-            let _to_lock_fd = if Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
-                // don't lock the same directory twice! (deadlock)
-                None
-            } else {
-                Some(flock_dir(io, to_dir_fd.as_ref()).into_other_err()?)
-            };
-
             match target_mode {
                 RenameTargetMode::Overwrite => {
                     link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_transfer_err(&from, &to)?;
+                        .into_put_err(&to)?;
                 }
                 RenameTargetMode::Create => {
                     io.linkat(
@@ -440,7 +450,7 @@ impl ObjectStore for LinuxFS {
                         to_file,
                         AtFlags::EMPTY_PATH,
                     )
-                    .into_transfer_err(&from, &to)?;
+                    .into_put_err(&to)?;
                 }
             }
             io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())

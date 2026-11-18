@@ -233,9 +233,8 @@ async fn race_source_overwrite(rename: bool) {
             [
                 // Pin the old inode, replace its last link, then try to publish it.
                 Matcher {
-                    task_id: Some(2),
-                    fun: Some("openat2"),
-                    args: [("path", Value::String("x".to_owned()))].into(),
+                    task_id: Some(3),
+                    fun: Some("flock"),
                     ..Default::default()
                 },
                 Matcher {
@@ -247,6 +246,12 @@ async fn race_source_overwrite(rename: bool) {
                 Matcher {
                     task_id: Some(2),
                     fun: Some("flock"),
+                    ..Default::default()
+                },
+                Matcher {
+                    task_id: Some(2),
+                    fun: Some("openat2"),
+                    args: [("path", Value::String("x".to_owned()))].into(),
                     ..Default::default()
                 },
             ]
@@ -289,12 +294,28 @@ async fn race_source_overwrite(rename: bool) {
 
     println!("{}", debugger.log());
 
-    let err = result.unwrap_err();
-    assert_matches!(err, Error::NotFound { .. });
+    result.unwrap();
+
+    if rename {
+        let err = storage.get(&from).await.unwrap_err();
+        assert_matches!(err, Error::NotFound { .. });
+    } else {
+        assert_eq!(
+            storage
+                .get(&from)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            b"new",
+        );
+    }
 
     assert_eq!(
         storage
-            .get(&from)
+            .get(&to)
             .await
             .unwrap()
             .bytes()
@@ -303,7 +324,4 @@ async fn race_source_overwrite(rename: bool) {
             .as_ref(),
         b"new",
     );
-
-    let err = storage.get(&to).await.unwrap_err();
-    assert_matches!(err, Error::NotFound { .. });
 }
