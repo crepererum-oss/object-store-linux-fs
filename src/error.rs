@@ -69,7 +69,7 @@ impl IOErrorExt for rustix::io::Errno {
         L: ToString,
     {
         match self {
-            Self::NOENT => object_store::Error::Precondition {
+            Self::NOENT | Self::NOTDIR => object_store::Error::Precondition {
                 path: location.to_string(),
                 source: Box::new(std::io::Error::from(self)),
             },

@@ -6,7 +6,7 @@ use futures_core::future::BoxFuture;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     Attribute, AttributeValue, Attributes, Error, MultipartUpload, ObjectStore, ObjectStoreExt,
-    PutOptions, PutPayload, path::Path,
+    PutMode, PutOptions, PutPayload, UpdateVersion, path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
 
@@ -449,4 +449,28 @@ async fn head_below_object_is_not_found() {
     let child = Path::parse("x/y").unwrap();
     let err = storage.head(&child).await.unwrap_err();
     assert_matches!(err, Error::NotFound { .. });
+}
+
+#[tokio::test]
+async fn update_below_object_fails_precondition() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    storage
+        .put(&Path::parse("x").unwrap(), Default::default())
+        .await
+        .unwrap();
+
+    let child = Path::parse("x/y").unwrap();
+    let mode = PutMode::Update(UpdateVersion {
+        e_tag: Some("missing".to_owned()),
+        version: None,
+    });
+    let err = storage
+        .put_opts(&child, Default::default(), mode.into())
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::Precondition { .. });
 }
