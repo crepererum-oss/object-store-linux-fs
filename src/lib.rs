@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures_core::stream::BoxStream;
 use futures_util::TryStreamExt;
 use object_store::{
-    CopyMode, CopyOptions, Error, GetOptions, GetResult, GetResultPayload, ListResult,
+    CopyMode, CopyOptions, Error, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
     PutResult, RenameOptions, RenameTargetMode, Result, UploadPart, path::Path,
 };
@@ -234,11 +234,20 @@ impl ObjectStore for LinuxFS {
                 .into_get_err(&location)?;
 
             let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
-            stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
+            let meta = stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
 
             let mut bytes_vec = Vec::with_capacity(ranges.len());
 
             for range in ranges {
+                // validate range using common code for consistent error handling
+                let range =
+                    GetRange::Bounded(range)
+                        .as_range(meta.size)
+                        .map_err(|e| Error::Generic {
+                            store: STORE_NAME,
+                            source: Box::new(e),
+                        })?;
+
                 let mut buffer = vec![0u8; range.clone().count()];
                 let mut buffer_offset = 0usize;
 
