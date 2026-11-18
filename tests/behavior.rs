@@ -452,6 +452,28 @@ async fn head_below_object_is_not_found() {
 }
 
 #[tokio::test]
+async fn delete_directory_only_key_is_not_found() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    let directory = Path::parse("x").unwrap();
+    let child = Path::parse("x/y").unwrap();
+    let bytes = b"child contents";
+    storage
+        .put(&child, PutPayload::from_static(bytes))
+        .await
+        .unwrap();
+
+    let result = storage.delete(&directory).await;
+    let value = storage.get(&child).await.unwrap().bytes().await.unwrap();
+    assert_eq!(value.as_ref(), bytes);
+    // LinuxFS reports missing objects as NotFound instead of a successful no-op.
+    assert_matches!(result, Err(Error::NotFound { path, .. }) if path == directory.as_ref());
+}
+
+#[tokio::test]
 async fn update_below_object_fails_precondition() {
     let path = tempfile::tempdir().unwrap();
     let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
