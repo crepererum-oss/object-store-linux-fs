@@ -5,7 +5,7 @@ use futures_util::TryStreamExt;
 use object_store::{
     Attribute, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
 };
-use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
+use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
 
 use crate::io_debugger::{DebugIOLayer, log::Value, order::Matcher, with_task_id};
 
@@ -58,6 +58,7 @@ async fn simple_create_put_drop() {
     T2 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
     T2 B2 linkat(old_dirfd: fd#1, old_path: "", new_dirfd: fd#0, new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
     T2 B2 renameat2(old_dirfd: fd#0, old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: fd#0, new_path: "x", flags: <empty>) -> Ok(())
+    T2 B2 unlinkat(dirfd: fd#0, path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: <empty>) -> Err(No such file or directory (os error 2))
     T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 fstat(fd: fd#1) -> Ok(...)
     T2 B2 close(fd: fd#1) -> Ok(())
@@ -70,7 +71,6 @@ async fn simple_create_put_drop() {
 }
 
 struct Fixture {
-    #[expect(dead_code)]
     tempdir: tempfile::TempDir,
     debugger: Arc<DebugIOLayer>,
     storage: LinuxFS,
@@ -156,6 +156,7 @@ async fn complex_put() {
     T2 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
     T2 B2 linkat(old_dirfd: fd#1, old_path: "", new_dirfd: fd#0, new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
     T2 B2 renameat2(old_dirfd: fd#0, old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: fd#0, new_path: "x", flags: <empty>) -> Ok(())
+    T2 B2 unlinkat(dirfd: fd#0, path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: <empty>) -> Err(No such file or directory (os error 2))
     T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 fstat(fd: fd#1) -> Ok(...)
     T2 B2 close(fd: fd#1) -> Ok(())
@@ -457,4 +458,33 @@ async fn race_transfer_opposite_directories(rename: bool) {
     );
     a.unwrap();
     b.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_copy_leaves_no_staging_files() {
+    let from = Path::parse("source").unwrap();
+    let to = Path::parse("destination").unwrap();
+
+    let fixture = Fixture::new([], async |storage| {
+        storage.put(&from, Default::default()).await.unwrap();
+    })
+    .await;
+
+    for _ in 0..2 {
+        fixture.storage.copy(&from, &to).await.unwrap();
+    }
+
+    // ObjectStore::list hides staging files, so inspect the directory directly.
+    let staging_files: Vec<_> = std::fs::read_dir(fixture.tempdir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| {
+            name.as_encoded_bytes()
+                .starts_with(STAGING_FILE_PREFIX.as_bytes())
+        })
+        .collect();
+    assert!(
+        staging_files.is_empty(),
+        "unexpected staging files: {staging_files:?}"
+    );
 }

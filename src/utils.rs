@@ -140,18 +140,20 @@ pub(crate) fn link_at_replace(
     // rename to target
     let rename_res = io.renameat2(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
 
-    match rename_res {
-        Ok(()) => {
-            // staging file is gone via rename, so we're good
+    // need to clean up staging file
+    //
+    // Note that this might be required even if renameat2 succeeded because when "from" and "to" are the same inode, it
+    // just doesn't do anything.
+    let unlink_res = match io.unlinkat(dir_fd, &staging_file, AtFlags::empty()) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::NOENT) => {
+            // file gone, that's what we wanted
             Ok(())
         }
-        Err(e) => {
-            // need to clean up staging file
-            io.unlinkat(dir_fd, &staging_file, AtFlags::empty())?;
+        Err(e) => Err(e),
+    };
 
-            Err(e)
-        }
-    }
+    rename_res.and(unlink_res)
 }
 
 fn staging_file_name(io: &mut dyn IOBlock, filename: &str) -> String {
