@@ -432,8 +432,10 @@ impl ObjectStore for LinuxFS {
                     .into_put_err(&to)?;
                 }
             }
-            io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())
-                .into_get_err(&from)?;
+            if to != from {
+                io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())
+                    .into_get_err(&from)?;
+            }
 
             // fsync AFTER both operations complete and in-order
             io.fsync(to_dir_fd.as_ref()).into_other_err()?;

@@ -413,3 +413,23 @@ async fn list_state() {
         assert_eq!(res2, files);
     }
 }
+
+#[tokio::test]
+async fn rename_to_self_preserves_bytes() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    let loc = Path::parse("file").unwrap();
+    let bytes = b"original contents";
+    storage
+        .put(&loc, PutPayload::from_static(bytes))
+        .await
+        .unwrap();
+
+    storage.rename(&loc, &loc).await.unwrap();
+
+    let result = storage.get(&loc).await.unwrap();
+    assert_eq!(result.bytes().await.unwrap().as_ref(), bytes);
+}
