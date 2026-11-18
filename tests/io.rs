@@ -552,3 +552,21 @@ async fn multipart_short_write_preserves_following_part() {
     assert_eq!(actual.len(), first_len + tail.len());
     assert_eq!(&actual[..first_len], expected_first.as_ref());
 }
+
+#[tokio::test]
+async fn get_ranges_stops_at_eof() {
+    let loc = Path::from("x");
+    let fixture = Fixture::new([], async |storage| {
+        storage
+            .put(&loc, PutPayload::from_static(b"abc"))
+            .await
+            .unwrap();
+    })
+    .await;
+
+    let ranges = fixture
+        .storage
+        .get_ranges(&loc, std::slice::from_ref(&(0..4)))
+        .await;
+    assert_eq!(ranges.unwrap(), [Bytes::from_static(b"abc")]);
+}

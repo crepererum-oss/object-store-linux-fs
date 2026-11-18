@@ -263,8 +263,14 @@ impl ObjectStore for LinuxFS {
 
                     buffer_offset += got;
                     file_offset += got as u64;
+
+                    if got == 0 {
+                        // EOF
+                        break;
+                    }
                 }
 
+                buffer.resize(buffer_offset, 0);
                 bytes_vec.push(Bytes::from(buffer));
             }
 
