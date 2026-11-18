@@ -433,3 +433,20 @@ async fn rename_to_self_preserves_bytes() {
     let result = storage.get(&loc).await.unwrap();
     assert_eq!(result.bytes().await.unwrap().as_ref(), bytes);
 }
+
+#[tokio::test]
+async fn head_below_object_is_not_found() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    storage
+        .put(&Path::parse("x").unwrap(), Default::default())
+        .await
+        .unwrap();
+
+    let child = Path::parse("x/y").unwrap();
+    let err = storage.head(&child).await.unwrap_err();
+    assert_matches!(err, Error::NotFound { .. });
+}
