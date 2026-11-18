@@ -292,22 +292,6 @@ async fn broken_attributes() {
             Default::default(),
             PutOptions {
                 attributes: Attributes::from_iter([(
-                    Attribute::Metadata("".into()),
-                    AttributeValue::from("x".to_owned()),
-                )]),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-    assert_matches!(err, Error::Generic { .. });
-
-    let err = storage
-        .put_opts(
-            &loc,
-            Default::default(),
-            PutOptions {
-                attributes: Attributes::from_iter([(
                     Attribute::Metadata(long_string(VFS_LIMIT_NAME + 1).into()),
                     AttributeValue::from("x".to_owned()),
                 )]),
@@ -347,10 +331,24 @@ async fn weird_attributes() {
         .unwrap();
 
     let loc = Path::parse("x").unwrap();
-    let attrs = Attributes::from_iter([(
-        Attribute::Metadata("x".into()),
-        AttributeValue::from("".to_owned()),
-    )]);
+    let attrs = Attributes::from_iter([
+        (
+            Attribute::Metadata("".into()),
+            AttributeValue::from("empty".to_owned()),
+        ),
+        (
+            Attribute::Metadata("x".into()),
+            AttributeValue::from("".to_owned()),
+        ),
+        (
+            Attribute::ContentType,
+            AttributeValue::from("ct".to_owned()),
+        ),
+        (
+            Attribute::Metadata("content-type".into()),
+            AttributeValue::from("md-ct".to_owned()),
+        ),
+    ]);
 
     storage
         .put_opts(

@@ -149,7 +149,7 @@ async fn complex_put() {
     T2 B2 block-start() -> Ok(())
     T2 B2 openat2(dirfd: fd#0, path: ".", oflags: DIRECTORY|NOFOLLOW|WRONLY|CLOEXEC|TMPFILE, mode: RUSR|WUSR|RGRP, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#1)
     T2 B2 fsetxattr(fd: fd#1, name: "user.content-type", value: ..., flags: CREATE) -> Ok(())
-    T2 B2 fsetxattr(fd: fd#1, name: "user.custom-attr", value: ..., flags: CREATE) -> Ok(())
+    T2 B2 fsetxattr(fd: fd#1, name: "user.md.custom-attr", value: ..., flags: CREATE) -> Ok(())
     T2 B2 pwrite2(fd: fd#1, bufs: ..., offset: 0, flags: <empty>) -> Ok(6)
     T2 B2 fsync(fd: fd#1) -> Ok(())
     T2 B2 openat2(dirfd: fd#0, path: ".", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#2)

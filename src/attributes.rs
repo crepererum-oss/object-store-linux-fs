@@ -1,4 +1,4 @@
-use std::mem::MaybeUninit;
+use std::{borrow::Cow, mem::MaybeUninit};
 
 use object_store::{Attribute, Attributes, Error, Result};
 use rustix::io::Errno;
@@ -8,29 +8,23 @@ use crate::{
     io::{IOBlock, IOFD},
 };
 
-pub(crate) fn attr_to_xattr(attr: &Attribute) -> Result<String> {
-    let name = match attr {
-        Attribute::ContentDisposition => "content-disposition",
-        Attribute::ContentEncoding => "content-encoding",
-        Attribute::ContentLanguage => "content-language",
-        Attribute::ContentType => "content-type",
-        Attribute::CacheControl => "cache-control",
-        Attribute::StorageClass => {
-            return Err(Error::NotImplemented {
-                operation: "StorageClass attribute".to_owned(),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-        Attribute::Metadata(s) => s,
-        other => {
-            return Err(Error::NotImplemented {
-                operation: format!("`{other:?}` attribute"),
-                implementer: STORE_NAME.to_owned(),
-            });
-        }
-    };
-
-    Ok(format!("user.{name}"))
+pub(crate) fn attr_to_xattr(attr: &Attribute) -> Result<Cow<'static, str>> {
+    match attr {
+        Attribute::ContentDisposition => Ok("user.content-disposition".into()),
+        Attribute::ContentEncoding => Ok("user.content-encoding".into()),
+        Attribute::ContentLanguage => Ok("user.content-language".into()),
+        Attribute::ContentType => Ok("user.content-type".into()),
+        Attribute::CacheControl => Ok("user.cache-control".into()),
+        Attribute::StorageClass => Err(Error::NotImplemented {
+            operation: "StorageClass attribute".to_owned(),
+            implementer: STORE_NAME.to_owned(),
+        }),
+        Attribute::Metadata(s) => Ok(format!("user.md.{s}").into()),
+        other => Err(Error::NotImplemented {
+            operation: format!("`{other:?}` attribute"),
+            implementer: STORE_NAME.to_owned(),
+        }),
+    }
 }
 
 fn xattr_to_attr(attr: &str) -> Option<Attribute> {
@@ -46,7 +40,9 @@ fn xattr_to_attr(attr: &str) -> Option<Attribute> {
             // ignore
             None
         }
-        other => Some(Attribute::Metadata(other.to_owned().into())),
+        other => Some(Attribute::Metadata(
+            other.strip_prefix("md.")?.to_owned().into(),
+        )),
     }
 }
 
