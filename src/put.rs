@@ -46,7 +46,7 @@ impl PreparedPutOperation {
         let (location, dir_fd, file) = spawn_io(&state.options().io_layer, move |io| {
             let (dirs, file) = split_dirs_and_filename(&location, open_dir_mode)?;
             let file = file.to_owned();
-            let dir_fd = state2.open_dir(io, dirs, OpenDirMode::Put)?;
+            let dir_fd = state2.open_dir(io, dirs, open_dir_mode)?;
             Ok((location, dir_fd, file))
         })
         .await?;

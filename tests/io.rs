@@ -3,7 +3,8 @@ use std::{assert_matches, sync::Arc};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use object_store::{
-    Attribute, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
+    Attribute, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
+    path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
 
@@ -569,4 +570,62 @@ async fn get_ranges_stops_at_eof() {
         .get_ranges(&loc, std::slice::from_ref(&(0..4)))
         .await;
     assert_eq!(ranges.unwrap(), [Bytes::from_static(b"abc")]);
+}
+
+#[tokio::test]
+async fn race_rejected_update_does_not_block_create() {
+    let fixture = Fixture::new(
+        [
+            // Resolve the update's parent before the create can publish `x`.
+            Matcher {
+                task_id: Some(2),
+                fun: Some("openat2"),
+                args: [("path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+        ],
+        async |_| {},
+    )
+    .await;
+
+    let parent = Path::from("x");
+    let child = Path::from("x/y");
+    let update = with_task_id(
+        2,
+        fixture.storage.put_opts(
+            &child,
+            Default::default(),
+            PutMode::Update(UpdateVersion {
+                e_tag: Some("missing".to_owned()),
+                version: None,
+            })
+            .into(),
+        ),
+    );
+    let create = with_task_id(
+        3,
+        fixture.storage.put_opts(
+            &parent,
+            PutPayload::from_static(b"created"),
+            PutMode::Create.into(),
+        ),
+    );
+
+    let (update, create) = tokio::join!(update, create);
+    assert_matches!(update, Err(Error::Precondition { .. }));
+    create.expect("the rejected update must not leave a directory at x");
+    let actual = fixture
+        .storage
+        .get(&parent)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(actual.as_ref(), b"created");
 }
