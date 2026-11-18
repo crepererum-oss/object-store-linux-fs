@@ -1,5 +1,3 @@
-use std::io::ErrorKind;
-
 use crate::constants::STORE_NAME;
 
 pub(crate) trait IOErrorExt {
@@ -25,60 +23,27 @@ impl IOErrorExt for rustix::io::Errno {
     where
         L: ToString,
     {
-        std::io::Error::from(self).into_get_err(location)
-    }
-
-    fn into_list_err(self) -> Option<Self::Out> {
-        std::io::Error::from(self).into_list_err()
-    }
-
-    fn into_put_err<L>(self, location: L) -> Self::Out
-    where
-        L: ToString,
-    {
-        std::io::Error::from(self).into_put_err(location)
-    }
-
-    fn into_update_err<L>(self, location: L) -> Self::Out
-    where
-        L: ToString,
-    {
-        std::io::Error::from(self).into_update_err(location)
-    }
-
-    fn into_other_err(self) -> Self::Out {
-        std::io::Error::from(self).into_other_err()
-    }
-}
-
-impl IOErrorExt for std::io::Error {
-    type Out = object_store::Error;
-
-    fn into_get_err<L>(self, location: L) -> Self::Out
-    where
-        L: ToString,
-    {
-        match self.kind() {
-            ErrorKind::NotFound => object_store::Error::NotFound {
+        match self {
+            Self::NOENT => object_store::Error::NotFound {
                 path: location.to_string(),
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
             _ => object_store::Error::Generic {
                 store: STORE_NAME,
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
         }
     }
 
     fn into_list_err(self) -> Option<Self::Out> {
-        match self.kind() {
-            ErrorKind::NotFound | ErrorKind::NotADirectory => {
+        match self {
+            Self::NOENT | Self::NOTDIR => {
                 // state changed under us, ignore it
                 None
             }
             _ => Some(object_store::Error::Generic {
                 store: STORE_NAME,
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             }),
         }
     }
@@ -87,14 +52,14 @@ impl IOErrorExt for std::io::Error {
     where
         L: ToString,
     {
-        match self.kind() {
-            ErrorKind::AlreadyExists => object_store::Error::AlreadyExists {
+        match self {
+            Self::EXIST => object_store::Error::AlreadyExists {
                 path: location.to_string(),
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
             _ => object_store::Error::Generic {
                 store: STORE_NAME,
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
         }
     }
@@ -103,14 +68,14 @@ impl IOErrorExt for std::io::Error {
     where
         L: ToString,
     {
-        match self.kind() {
-            ErrorKind::NotFound => object_store::Error::Precondition {
+        match self {
+            Self::NOENT => object_store::Error::Precondition {
                 path: location.to_string(),
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
             _ => object_store::Error::Generic {
                 store: STORE_NAME,
-                source: Box::new(self),
+                source: Box::new(std::io::Error::from(self)),
             },
         }
     }
@@ -118,7 +83,7 @@ impl IOErrorExt for std::io::Error {
     fn into_other_err(self) -> Self::Out {
         object_store::Error::Generic {
             store: STORE_NAME,
-            source: Box::new(self),
+            source: Box::new(std::io::Error::from(self)),
         }
     }
 }

@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    io::ErrorKind,
     path::PathBuf,
     sync::Arc,
 };
@@ -67,7 +66,7 @@ impl State {
                         // try to create dir
                         match io.mkdirat(dir_fd.as_ref(), part, MODE_DIR_CREATE) {
                             Ok(()) => {}
-                            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                            Err(rustix::io::Errno::EXIST) => {
                                 // race
                             }
                             Err(e) => {
