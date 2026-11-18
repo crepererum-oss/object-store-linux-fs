@@ -127,14 +127,16 @@ impl RunningPutOperation {
             .iter()
             .map(|bytes| IoSlice::new(bytes))
             .collect::<Vec<_>>();
+        let mut slices = slices.as_mut_slice();
+
         let len = slices.iter().map(|s| s.len()).sum::<usize>();
         let mut offset = start_offset;
         while offset < start_offset + len {
             let written = io
-                .pwritev2(file_fd.as_ref(), &slices, offset as _, READ_WRITE_FLAGS)
+                .pwritev2(file_fd.as_ref(), slices, offset as _, READ_WRITE_FLAGS)
                 .into_other_err()?;
             offset += written;
-            IoSlice::advance_slices(&mut &mut slices[..], written);
+            IoSlice::advance_slices(&mut slices, written);
         }
 
         Ok(())

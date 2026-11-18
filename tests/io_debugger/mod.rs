@@ -281,7 +281,7 @@ impl IOBlock for DebugIOBlock {
             ]),
             state: |_| (),
             f: |inner, ()| inner.fgetxattr_query(fd.inner.as_ref(), name),
-            map_ok: |_| Value::Ellipsis,
+            map_ok: |n| Value::Size(*n as _),
         })
     }
 
@@ -313,7 +313,7 @@ impl IOBlock for DebugIOBlock {
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
             state: |_| (),
             f: |inner, ()| inner.flistxattr_query(fd.inner.as_ref()),
-            map_ok: |_| Value::Ellipsis,
+            map_ok: |n| Value::Size(*n as _),
         })
     }
 
@@ -599,12 +599,12 @@ impl IOBlock for DebugIOBlock {
             args: IndexMap::from([
                 ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),
-                ("offset", Value::Ellipsis),
+                ("offset", Value::Size(offset)),
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
             f: |inner, ()| inner.preadv2(fd.inner.as_ref(), bufs, offset, flags),
-            map_ok: |_| Value::Ellipsis,
+            map_ok: |n| Value::Size(*n as _),
         })
     }
 
@@ -624,12 +624,12 @@ impl IOBlock for DebugIOBlock {
             args: IndexMap::from([
                 ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),
-                ("offset", Value::Ellipsis),
+                ("offset", Value::Size(offset)),
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
             f: |inner, ()| inner.pwritev2(fd.inner.as_ref(), bufs, offset, flags),
-            map_ok: |_| Value::Ellipsis,
+            map_ok: |n| Value::Size(*n as _),
         })
     }
 
