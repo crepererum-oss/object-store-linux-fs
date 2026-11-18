@@ -437,7 +437,9 @@ impl ObjectStore for LinuxFS {
 
             // fsync AFTER both operations complete and in-order
             io.fsync(to_dir_fd.as_ref()).into_other_err()?;
-            io.fsync(from_dir_fd.as_ref()).into_other_err()?;
+            if !Arc::ptr_eq(&from_dir_fd, &to_dir_fd) {
+                io.fsync(from_dir_fd.as_ref()).into_other_err()?;
+            }
 
             Ok(())
         })
