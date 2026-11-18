@@ -360,7 +360,7 @@ impl IOBlock for DebugIOBlock {
             .expect("wrong type");
 
         self.event(Event {
-            fun: "fstat",
+            fun: "fsetxattr",
             args: IndexMap::from([
                 ("fd", Value::ID("fd", fd.id)),
                 ("name", Value::String(name.to_owned())),

@@ -1,8 +1,9 @@
 use std::{assert_matches, sync::Arc};
 
+use bytes::Bytes;
 use futures_util::TryStreamExt;
 use object_store::{
-    Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
+    Attribute, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
@@ -11,7 +12,7 @@ use crate::io_debugger::{DebugIOLayer, log::Value, order::Matcher, with_task_id}
 mod io_debugger;
 
 #[tokio::test]
-async fn simple_put() {
+async fn simple_create_put_drop() {
     let path = tempfile::tempdir().unwrap();
     let debugger = Arc::new(DebugIOLayer::new());
     let storage = with_task_id(1, async {
@@ -68,42 +69,126 @@ async fn simple_put() {
     );
 }
 
+struct Fixture {
+    #[expect(dead_code)]
+    tempdir: tempfile::TempDir,
+    debugger: Arc<DebugIOLayer>,
+    storage: LinuxFS,
+}
+
+impl Fixture {
+    async fn new<const N: usize, F>(order: [Matcher; N], f: F) -> Self
+    where
+        F: for<'a> AsyncFnOnce(&'a LinuxFS),
+    {
+        let tempdir = tempfile::tempdir().unwrap();
+        let debugger = Arc::new(DebugIOLayer::new().with_order(order.into()));
+        let storage = LinuxFS::new(
+            tempdir.path().to_path_buf(),
+            LinuxFSOptions {
+                io_layer: Arc::clone(&debugger) as _,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        f(&storage).await;
+        debugger.wipe_log();
+
+        Self {
+            tempdir,
+            debugger,
+            storage,
+        }
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        println!("{}", self.debugger.log());
+    }
+}
+
+#[tokio::test]
+async fn complex_put() {
+    let fixture = Fixture::new([], async |_| {}).await;
+
+    let loc = Path::parse("x").unwrap();
+    with_task_id(2, async {
+        fixture
+            .storage
+            .put_opts(
+                &loc,
+                [Bytes::from_static(b"foo"), Bytes::from_static(b"bar")]
+                    .into_iter()
+                    .collect(),
+                PutOptions {
+                    attributes: [
+                        (Attribute::ContentType, "my-content"),
+                        (Attribute::Metadata("custom-attr".into()), "custom-value"),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+
+    insta::assert_snapshot!(
+        fixture.debugger.log(),
+        @r#"
+    T2 B1 block-start() -> Ok(())
+    T2 B1 lock(mutex: mutex#0) -> Ok(guard#0)
+    T2 B1 unlock(mutex: mutex#0, guard: guard#0) -> Ok(())
+    T2 B1 block-end() -> Ok(())
+    T2 B2 block-start() -> Ok(())
+    T2 B2 openat2(dirfd: fd#0, path: ".", oflags: DIRECTORY|NOFOLLOW|WRONLY|CLOEXEC|TMPFILE, mode: RUSR|WUSR|RGRP, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#1)
+    T2 B2 fsetxattr(fd: fd#1, name: "user.content-type", value: ..., flags: CREATE) -> Ok(())
+    T2 B2 fsetxattr(fd: fd#1, name: "user.custom-attr", value: ..., flags: CREATE) -> Ok(())
+    T2 B2 pwrite2(fd: fd#1, bufs: ..., offset: ..., flags: <empty>) -> Ok(...)
+    T2 B2 fsync(fd: fd#1) -> Ok(())
+    T2 B2 openat2(dirfd: fd#0, path: ".", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#2)
+    T2 B2 flock(fd: fd#2, operation: ...) -> Ok(())
+    T2 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
+    T2 B2 linkat(old_dirfd: fd#1, old_path: "", new_dirfd: fd#0, new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
+    T2 B2 renameat2(old_dirfd: fd#0, old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: fd#0, new_path: "x", flags: <empty>) -> Ok(())
+    T2 B2 fsync(fd: fd#0) -> Ok(())
+    T2 B2 fstat(fd: fd#1) -> Ok(...)
+    T2 B2 close(fd: fd#1) -> Ok(())
+    T2 B2 close(fd: fd#2) -> Ok(())
+    T2 B2 block-end() -> Ok(())
+    "#,
+    );
+}
+
 #[tokio::test]
 async fn race_put_create() {
-    let path = tempfile::tempdir().unwrap();
-    let debugger = Arc::new(
-        DebugIOLayer::new().with_order(
-            [
-                Matcher {
-                    task_id: Some(3),
-                    fun: Some("flock"),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(2),
-                    fun: Some("flock"),
-                    ..Default::default()
-                },
-            ]
-            .into(),
-        ),
-    );
-    let storage = LinuxFS::new(
-        path.path().to_path_buf(),
-        LinuxFSOptions {
-            io_layer: Arc::clone(&debugger) as _,
-            ..Default::default()
-        },
+    let fixture = Fixture::new(
+        [
+            Matcher {
+                task_id: Some(3),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+        ],
+        async |_| {},
     )
-    .await
-    .unwrap();
-
-    debugger.wipe_log();
+    .await;
 
     let loc = Path::parse("x").unwrap();
 
     let fut1 = with_task_id(2, async {
-        let err = storage
+        let err = fixture
+            .storage
             .put_opts(
                 &loc,
                 PutPayload::from_static(b"foo"),
@@ -117,7 +202,8 @@ async fn race_put_create() {
         assert_matches!(err, Error::AlreadyExists { .. });
     });
     let fut2 = with_task_id(3, async {
-        storage
+        fixture
+            .storage
             .put_opts(
                 &loc,
                 PutPayload::from_static(b"bar"),
@@ -132,10 +218,11 @@ async fn race_put_create() {
 
     tokio::join!(fut1, fut2);
 
-    let log = debugger.log();
+    let log = fixture.debugger.log();
 
     assert_eq!(
-        storage
+        fixture
+            .storage
             .get(&loc)
             .await
             .unwrap()
@@ -151,56 +238,45 @@ async fn race_put_create() {
 
 #[tokio::test]
 async fn race_list_file_becomes_directory() {
-    let path = tempfile::tempdir().unwrap();
-    let debugger = Arc::new(
-        DebugIOLayer::new().with_order(
-            [
-                Matcher {
-                    task_id: Some(2),
-                    fun: Some("getdents"),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(3),
-                    fun: Some("unlinkat"),
-                    args: [("path", Value::String("x".to_owned()))].into(),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(3),
-                    fun: Some("mkdirat"),
-                    args: [("path", Value::String("x".to_owned()))].into(),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(2),
-                    fun: Some("statat"),
-                    args: [("path", Value::String("x".to_owned()))].into(),
-                    ..Default::default()
-                },
-            ]
-            .into(),
-        ),
-    );
-    let storage = LinuxFS::new(
-        path.path().to_path_buf(),
-        LinuxFSOptions {
-            io_layer: Arc::clone(&debugger) as _,
-            ..Default::default()
+    let loc = Path::from("x");
+
+    let fixture = Fixture::new(
+        [
+            Matcher {
+                task_id: Some(2),
+                fun: Some("getdents"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("unlinkat"),
+                args: [("path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("mkdirat"),
+                args: [("path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("statat"),
+                args: [("path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+        ],
+        async |storage| {
+            storage.put(&loc, Default::default()).await.unwrap();
         },
     )
-    .await
-    .unwrap();
+    .await;
 
-    let loc = Path::from("x");
-    storage.put(&loc, Default::default()).await.unwrap();
-
-    debugger.wipe_log();
-
-    let list = with_task_id(2, storage.list(None).try_collect::<Vec<_>>());
+    let list = with_task_id(2, fixture.storage.list(None).try_collect::<Vec<_>>());
     let replace = with_task_id(3, async {
-        storage.delete(&loc).await.unwrap();
-        storage
+        fixture.storage.delete(&loc).await.unwrap();
+        fixture
+            .storage
             .put(&Path::from("x/y"), Default::default())
             .await
             .unwrap();
@@ -211,7 +287,7 @@ async fn race_list_file_becomes_directory() {
     assert!(
         result.is_ok(),
         "listing failed: {result:?}\n{}",
-        debugger.log()
+        fixture.debugger.log()
     );
     assert!(result.unwrap().is_empty());
 }
@@ -227,81 +303,71 @@ async fn race_rename_source_overwrite() {
 }
 
 async fn race_source_overwrite(rename: bool) {
-    let path = tempfile::tempdir().unwrap();
-    let debugger = Arc::new(
-        DebugIOLayer::new().with_order(
-            [
-                // Pin the old inode, replace its last link, then try to publish it.
-                Matcher {
-                    task_id: Some(3),
-                    fun: Some("flock"),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(3),
-                    fun: Some("renameat2"),
-                    args: [("new_path", Value::String("x".to_owned()))].into(),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(2),
-                    fun: Some("flock"),
-                    ..Default::default()
-                },
-                Matcher {
-                    task_id: Some(2),
-                    fun: Some("openat2"),
-                    args: [("path", Value::String("x".to_owned()))].into(),
-                    ..Default::default()
-                },
-            ]
-            .into(),
-        ),
-    );
-    let storage = LinuxFS::new(
-        path.path().to_path_buf(),
-        LinuxFSOptions {
-            io_layer: Arc::clone(&debugger) as _,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-
     let from = Path::from("x");
     let to = Path::from("y");
 
-    storage
-        .put(&from, PutPayload::from_static(b"old"))
-        .await
-        .unwrap();
-    debugger.wipe_log();
+    let fixture = Fixture::new(
+        [
+            // Pin the old inode, replace its last link, then try to publish it.
+            Matcher {
+                task_id: Some(3),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(3),
+                fun: Some("renameat2"),
+                args: [("new_path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("flock"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("openat2"),
+                args: [("path", Value::String("x".to_owned()))].into(),
+                ..Default::default()
+            },
+        ],
+        async |storage| {
+            storage
+                .put(&from, PutPayload::from_static(b"old"))
+                .await
+                .unwrap();
+        },
+    )
+    .await;
 
     let transfer = with_task_id(2, async {
         if rename {
-            storage.rename(&from, &to).await
+            fixture.storage.rename(&from, &to).await
         } else {
-            storage.copy(&from, &to).await
+            fixture.storage.copy(&from, &to).await
         }
     });
     let overwrite = with_task_id(3, async {
-        storage
+        fixture
+            .storage
             .put(&from, PutPayload::from_static(b"new"))
             .await
             .unwrap();
     });
     let (result, ()) = tokio::join!(transfer, overwrite);
 
-    println!("{}", debugger.log());
+    println!("{}", fixture.debugger.log());
 
     result.unwrap();
 
     if rename {
-        let err = storage.get(&from).await.unwrap_err();
+        let err = fixture.storage.get(&from).await.unwrap_err();
         assert_matches!(err, Error::NotFound { .. });
     } else {
         assert_eq!(
-            storage
+            fixture
+                .storage
                 .get(&from)
                 .await
                 .unwrap()
@@ -314,7 +380,8 @@ async fn race_source_overwrite(rename: bool) {
     }
 
     assert_eq!(
-        storage
+        fixture
+            .storage
             .get(&to)
             .await
             .unwrap()

@@ -79,10 +79,16 @@ impl PreparedPutOperation {
             )
             .into_other_err()?;
 
-        for (attr, attr_val) in attributes.iter() {
+        // set attributes in deterministic order
+        let mut attrs = attributes
+            .iter()
+            .map(|(attr, att_val)| attr_to_xattr(attr).map(|attr| (attr, att_val)))
+            .collect::<Result<Vec<_>, _>>()?;
+        attrs.sort_unstable_by(|(attr1, _attr_val1), (attr2, _attr_val2)| attr1.cmp(attr2));
+        for (attr, attr_val) in attrs {
             io.fsetxattr(
                 file_fd.as_ref(),
-                &attr_to_xattr(attr)?,
+                &attr,
                 attr_val.as_bytes(),
                 XattrFlags::CREATE,
             )
