@@ -1,4 +1,9 @@
-use std::{io::IoSliceMut, ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    io::IoSliceMut,
+    ops::{Deref, DerefMut, Range},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,7 +20,7 @@ use crate::{
     attributes::read_attrs_from_fd,
     constants::{OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS, STORE_NAME},
     error::IOErrorExt,
-    io::{IOLayer, spawn_io},
+    io::{IOLayer, IORwLock, spawn_io},
     put::{PreparedPutOperation, RunningPutOperation},
     state::State,
     utils::{
@@ -101,8 +106,14 @@ impl ObjectStore for LinuxFS {
         })
         .await?;
         Ok(Box::new(LinuxFSUpload {
-            op: Some(Arc::new(op)),
-            offset: 0,
+            state: Arc::new(IORwLock::new(
+                &self.state.options().io_layer,
+                UploadState::Running { op },
+            )),
+            parts: Arc::new(Mutex::new(UploadParts {
+                parts: Default::default(),
+                offset: 0,
+            })),
             io_layer: Arc::clone(&self.state.options().io_layer),
         }))
     }
@@ -465,9 +476,49 @@ impl ObjectStore for LinuxFS {
 }
 
 #[derive(Debug)]
-struct LinuxFSUpload {
-    op: Option<Arc<RunningPutOperation>>,
+enum UploadState {
+    Running { op: RunningPutOperation },
+    Finished { broken: bool },
+}
+
+#[derive(Debug)]
+struct UploadParts {
     offset: usize,
+    parts: Vec<PartState>,
+}
+
+impl UploadParts {
+    fn any_failed(&self) -> Result<bool> {
+        let mut any_failed = false;
+        for part in &self.parts {
+            match part {
+                PartState::Running => {
+                    return Err(LinuxFSUpload::err_still_running());
+                }
+                PartState::Failed => {
+                    any_failed = true;
+                }
+                PartState::Ok => {}
+            }
+        }
+        Ok(any_failed)
+    }
+}
+
+#[derive(Debug)]
+enum PartState {
+    Running,
+    Failed,
+    Ok,
+}
+
+#[derive(Debug)]
+struct LinuxFSUpload {
+    state: Arc<IORwLock<UploadState>>,
+
+    // NOTE: this does NOT count as an I/O lock because we don't do I/O during it
+    parts: Arc<Mutex<UploadParts>>,
+
     io_layer: Arc<dyn IOLayer>,
 }
 
@@ -485,35 +536,96 @@ impl LinuxFSUpload {
             source: "upload no longer running".to_owned().into(),
         }
     }
+
+    fn err_failed() -> Error {
+        Error::Generic {
+            store: STORE_NAME,
+            source: "an upload part failed".to_owned().into(),
+        }
+    }
 }
 
 #[async_trait]
 impl MultipartUpload for LinuxFSUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let Some(op) = &self.op else {
-            return Box::pin(futures_util::future::ready(Err(Self::err_not_running())));
-        };
-        let op = Arc::clone(op);
-
-        let offset = self.offset;
-        self.offset += data.content_length();
+        let state = Arc::clone(&self.state);
+        let parts = Arc::clone(&self.parts);
 
         let io_layer = Arc::clone(&self.io_layer);
+
+        // short-lived lock to set the part state
+        let (offset, idx) = {
+            let mut parts = parts.lock().unwrap();
+
+            let offset = parts.offset;
+            parts.offset += data.content_length();
+
+            let idx = parts.parts.len();
+            parts.parts.push(PartState::Running);
+
+            (offset, idx)
+        };
+
         Box::pin(async move {
             spawn_io(&io_layer, move |io| {
-                op.blocking_io_put(io, data, offset)?;
-                Ok(())
+                let state = state.read(io);
+
+                let op = match state.deref() {
+                    UploadState::Running { op } => op,
+                    UploadState::Finished { broken: _ } => {
+                        return Err(Self::err_not_running());
+                    }
+                };
+
+                // perform IO
+                let res = op.blocking_io_put(io, data, offset);
+
+                // short-lived lock to set the part state
+                {
+                    let mut parts = parts.lock().unwrap();
+                    parts.parts[idx] = match &res {
+                        Ok(()) => PartState::Ok,
+                        Err(_) => PartState::Failed,
+                    };
+                }
+
+                res
             })
             .await
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let op = self.op.take().ok_or_else(Self::err_not_running)?;
+        // short-lived lock to get the part state
+        let any_failed = {
+            let parts = self.parts.lock().unwrap();
+            parts.any_failed()?
+        };
+
+        let state = Arc::clone(&self.state);
 
         let meta = spawn_io(&self.io_layer, move |io| {
-            let op = Arc::try_unwrap(op).map_err(|_| Self::err_still_running())?;
-            op.blocking_io_commit(io)
+            let mut state = state.write(io);
+
+            let mut tmp = UploadState::Finished { broken: true };
+            std::mem::swap(state.deref_mut(), &mut tmp);
+
+            let res = match tmp {
+                UploadState::Running { op } => {
+                    if any_failed {
+                        drop(op);
+                        Err(Self::err_failed())
+                    } else {
+                        op.blocking_io_commit(io)
+                    }
+                }
+                UploadState::Finished { .. } => Err(Self::err_not_running()),
+            };
+
+            *state = UploadState::Finished {
+                broken: res.is_err(),
+            };
+            res
         })
         .await?;
 
@@ -525,13 +637,50 @@ impl MultipartUpload for LinuxFSUpload {
     }
 
     async fn abort(&mut self) -> Result<()> {
-        let op = self.op.take().ok_or_else(Self::err_not_running)?;
+        // short-lived lock to get the part state
+        let any_failed = {
+            let parts = self.parts.lock().unwrap();
+            parts.any_failed()?
+        };
+
+        let state = Arc::clone(&self.state);
 
         // drop in I/O runtime
-        spawn_io(&self.io_layer, move |_| {
-            let op = Arc::try_unwrap(op).map_err(|_| Self::err_still_running())?;
-            drop(op);
-            Ok(())
+        spawn_io(&self.io_layer, move |io| {
+            let mut state = state.write(io);
+
+            let mut tmp = UploadState::Finished { broken: true };
+            std::mem::swap(state.deref_mut(), &mut tmp);
+
+            let res = match tmp {
+                UploadState::Running { op } => {
+                    if any_failed {
+                        // allow "abort after fail"
+                        Ok(true)
+                    } else {
+                        drop(op);
+                        Ok(false)
+                    }
+                }
+                UploadState::Finished { broken } => {
+                    if broken {
+                        // allow "abort after fail"
+                        Ok(true)
+                    } else {
+                        Err(Self::err_not_running())
+                    }
+                }
+            };
+
+            *state = UploadState::Finished {
+                broken: match res {
+                    Ok(true) => true,
+                    Ok(false) => false,
+                    Err(_) => true,
+                },
+            };
+
+            res.map(|_| ())
         })
         .await
     }

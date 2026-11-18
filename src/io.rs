@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use lock_api::{GuardNoSend, RawMutex};
+use lock_api::{GuardNoSend, RawMutex, RawRwLock};
 use object_store::Error;
 use rustix::{
     fs::{
@@ -26,6 +26,7 @@ use crate::constants::STORE_NAME;
 pub trait IOLayer: Debug + Send + Sync {
     fn prepare_block(&self) -> Box<dyn IOBlockPrepared>;
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
+    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock>;
 }
 
 pub trait IOBlockPrepared: Send {
@@ -81,6 +82,12 @@ pub trait IOBlock {
 
     /// Lock the given lock.
     fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard>;
+
+    /// Write-lock the given rw lock.
+    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard>;
+
+    /// Read-lock the given rw lock.
+    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard>;
 
     /// See <https://man.archlinux.org/man/linkat.2>.
     fn linkat(
@@ -159,16 +166,26 @@ pub trait IORawMutex: Any + Send + Sync {
 
 pub trait IORawMutexGuard: Any {}
 
+pub trait IORawRwLock: Any + Send + Sync {
+    /// # Safety
+    /// See [`lock_api::RawRwLock::unlock_shared`].
+    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>);
+
+    /// # Safety
+    /// See [`lock_api::RawRwLock::unlock_exclusive`].
+    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>);
+}
+
 pub trait IOFD: Any + Debug + Send + Sync {}
 
 #[derive(Debug)]
 pub struct RustixIOLayer;
 
-struct RustixIORawLock {
+struct RustixIORawMutex {
     lock: parking_lot::RawMutex,
 }
 
-impl IORawMutex for RustixIORawLock {
+impl IORawMutex for RustixIORawMutex {
     unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>) {
         let guard = *(guard as Box<dyn Any>)
             .downcast::<RustixIORawLockGuard>()
@@ -177,6 +194,34 @@ impl IORawMutex for RustixIORawLock {
         // SAFETY: caller
         unsafe {
             self.lock.unlock(guard.guard);
+        }
+    }
+}
+
+struct RustixIORawRwLock {
+    lock: parking_lot::RawRwLock,
+}
+
+impl IORawRwLock for RustixIORawRwLock {
+    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>) {
+        let guard = *(guard as Box<dyn Any>)
+            .downcast::<RustixIORawLockGuard>()
+            .expect("wrong type");
+
+        // SAFETY: caller
+        unsafe {
+            self.lock.unlock_shared(guard.guard);
+        }
+    }
+
+    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>) {
+        let guard = *(guard as Box<dyn Any>)
+            .downcast::<RustixIORawLockGuard>()
+            .expect("wrong type");
+
+        // SAFETY: caller
+        unsafe {
+            self.lock.unlock_exclusive(guard.guard);
         }
     }
 }
@@ -200,8 +245,14 @@ impl IOLayer for RustixIOLayer {
     }
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
-        Box::new(RustixIORawLock {
+        Box::new(RustixIORawMutex {
             lock: parking_lot::RawMutex::INIT,
+        })
+    }
+
+    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
+        Box::new(RustixIORawRwLock {
+            lock: parking_lot::RawRwLock::INIT,
         })
     }
 }
@@ -216,6 +267,10 @@ where
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
         self.as_ref().create_raw_mutex()
+    }
+
+    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
+        self.as_ref().create_raw_rwlock()
     }
 }
 
@@ -360,10 +415,28 @@ impl IOBlock for RustixIOBlock {
 
     fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard> {
         let guard = (raw_lock as &dyn Any)
-            .downcast_ref::<RustixIORawLock>()
+            .downcast_ref::<RustixIORawMutex>()
             .expect("wrong type")
             .lock
             .lock();
+        Box::new(RustixIORawLockGuard { guard })
+    }
+
+    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
+        let guard = (raw_lock as &dyn Any)
+            .downcast_ref::<RustixIORawRwLock>()
+            .expect("wrong type")
+            .lock
+            .lock_exclusive();
+        Box::new(RustixIORawLockGuard { guard })
+    }
+
+    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
+        let guard = (raw_lock as &dyn Any)
+            .downcast_ref::<RustixIORawRwLock>()
+            .expect("wrong type")
+            .lock
+            .lock_shared();
         Box::new(RustixIORawLockGuard { guard })
     }
 
@@ -572,6 +645,109 @@ impl<'a, T: 'a> Deref for IOMutexGuard<'a, T> {
 }
 
 impl<'a, T: 'a> DerefMut for IOMutexGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { self.mutex.data.get().as_mut_unchecked() }
+    }
+}
+
+pub(crate) struct IORwLock<T> {
+    data: UnsafeCell<T>,
+    raw: Box<dyn IORawRwLock>,
+}
+
+impl<T> IORwLock<T> {
+    pub(crate) fn new(io: &dyn IOLayer, data: T) -> Self {
+        Self {
+            data: UnsafeCell::new(data),
+            raw: io.create_raw_rwlock(),
+        }
+    }
+
+    pub(crate) fn read(&self, io: &mut dyn IOBlock) -> IORwLockReadGuard<'_, T> {
+        let guard = io.lock_shared(self.raw.as_ref());
+
+        IORwLockReadGuard {
+            mutex: self,
+            marker: PhantomData,
+            guard: ManuallyDrop::new(guard),
+        }
+    }
+
+    pub(crate) fn write(&self, io: &mut dyn IOBlock) -> IORwLockWriteGuard<'_, T> {
+        let guard = io.lock_exclusive(self.raw.as_ref());
+
+        IORwLockWriteGuard {
+            mutex: self,
+            marker: PhantomData,
+            guard: ManuallyDrop::new(guard),
+        }
+    }
+}
+
+unsafe impl<T: Send> Sync for IORwLock<T> {}
+
+impl<T> std::fmt::Debug for IORwLock<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IORwLock").finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct IORwLockReadGuard<'a, T> {
+    mutex: &'a IORwLock<T>,
+    marker: PhantomData<&'a T>,
+    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
+}
+
+impl<'a, T: 'a> Drop for IORwLockReadGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Safety: A ReadGuard always holds the lock.
+        unsafe {
+            self.mutex
+                .raw
+                .unlock_shared(ManuallyDrop::take(&mut self.guard));
+        }
+    }
+}
+
+impl<'a, T: 'a> Deref for IORwLockReadGuard<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { self.mutex.data.get().as_ref_unchecked() }
+    }
+}
+
+pub(crate) struct IORwLockWriteGuard<'a, T> {
+    mutex: &'a IORwLock<T>,
+    marker: PhantomData<&'a mut T>,
+    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
+}
+
+impl<'a, T: 'a> Drop for IORwLockWriteGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // Safety: A WriteGuard always holds the lock.
+        unsafe {
+            self.mutex
+                .raw
+                .unlock_exclusive(ManuallyDrop::take(&mut self.guard));
+        }
+    }
+}
+
+impl<'a, T: 'a> Deref for IORwLockWriteGuard<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { self.mutex.data.get().as_ref_unchecked() }
+    }
+}
+
+impl<'a, T: 'a> DerefMut for IORwLockWriteGuard<'a, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         unsafe { self.mutex.data.get().as_mut_unchecked() }

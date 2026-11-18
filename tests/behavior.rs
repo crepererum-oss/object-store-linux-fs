@@ -6,7 +6,7 @@ use futures_core::future::BoxFuture;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     Attribute, AttributeValue, Attributes, Error, MultipartUpload, ObjectStore, ObjectStoreExt,
-    PutMode, PutOptions, PutPayload, UpdateVersion, path::Path,
+    PutMode, PutOptions, PutPayload, UpdateVersion, WriteMultipart, path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
 
@@ -264,6 +264,24 @@ async fn multipart_upload_state_error() {
             continue;
         }
 
+        println!("drop(running) => {}.await", finish_op.name);
+
+        let mut upload = storage.put_multipart(&loc).await.unwrap();
+
+        let f = upload.put_part(Default::default());
+        drop(f);
+
+        assert_matches!(
+            (finish_op.f)(&mut upload).await.unwrap_err(),
+            Error::Generic { source, .. } if source.to_string() == "upload is still running",
+        );
+    }
+
+    for finish_op in &ops {
+        if !finish_op.finishes {
+            continue;
+        }
+
         println!("{}.await while running", finish_op.name);
 
         let mut upload = storage.put_multipart(&loc).await.unwrap();
@@ -274,6 +292,54 @@ async fn multipart_upload_state_error() {
             Error::Generic { source, .. } if source.to_string() == "upload is still running",
         );
     }
+}
+
+#[tokio::test]
+async fn multipart_finish_preserves_commit_error_raw() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    let loc_outer = Path::parse("a").unwrap();
+    let loc_inner = Path::parse("a/b").unwrap();
+
+    let mut upload = storage.put_multipart(&loc_outer).await.unwrap();
+    storage
+        .put(&loc_inner, PutPayload::default())
+        .await
+        .unwrap();
+    let err = upload.complete().await.unwrap_err();
+    assert_matches!(
+        err,
+        Error::Generic { source, .. }
+        if source.downcast_ref::<std::io::Error>().map(|e| e.kind() == std::io::ErrorKind::IsADirectory).unwrap_or_default(),
+    );
+}
+
+#[tokio::test]
+async fn multipart_finish_preserves_commit_error_uploader() {
+    let path = tempfile::tempdir().unwrap();
+    let storage = LinuxFS::new(path.path().to_path_buf(), LinuxFSOptions::default())
+        .await
+        .unwrap();
+
+    let loc_outer = Path::parse("a").unwrap();
+    let loc_inner = Path::parse("a/b").unwrap();
+
+    let writer =
+        WriteMultipart::new_with_chunk_size(storage.put_multipart(&loc_outer).await.unwrap(), 16);
+
+    storage
+        .put(&loc_inner, PutPayload::default())
+        .await
+        .unwrap();
+    let err = writer.finish().await.unwrap_err();
+    assert_matches!(
+        err,
+        Error::Generic { source, .. }
+        if source.downcast_ref::<std::io::Error>().map(|e| e.kind() == std::io::ErrorKind::IsADirectory).unwrap_or_default(),
+    );
 }
 
 #[tokio::test]

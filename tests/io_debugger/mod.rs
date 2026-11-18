@@ -8,7 +8,8 @@ use std::{
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard, RustixIOLayer,
+    IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard, IORawRwLock,
+    RustixIOLayer,
 };
 use rustix::io::Errno;
 use uuid::Uuid;
@@ -44,7 +45,8 @@ struct State {
     block_counter: u64,
     fd_counter: u64,
     guard_counter: u64,
-    lock_counter: u64,
+    mutex_counter: u64,
+    rwlock_counter: u64,
     uuid_counter: u128,
 }
 
@@ -108,8 +110,8 @@ impl IOLayer for DebugIOLayer {
         let state = Arc::clone(&self.state);
         let mut guard = self.state.lock().unwrap();
 
-        let id = guard.lock_counter;
-        guard.lock_counter += 1;
+        let id = guard.mutex_counter;
+        guard.mutex_counter += 1;
 
         let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
         let block_id = SYNC_BLOCK_ID.get();
@@ -125,6 +127,31 @@ impl IOLayer for DebugIOLayer {
         Box::new(DebugIORawMutex {
             id,
             inner: self.inner.create_raw_mutex(),
+            state,
+        })
+    }
+
+    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
+        let state = Arc::clone(&self.state);
+        let mut guard = self.state.lock().unwrap();
+
+        let id = guard.rwlock_counter;
+        guard.rwlock_counter += 1;
+
+        let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
+        let block_id = SYNC_BLOCK_ID.get();
+
+        guard.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "create_rwlock",
+            args: IndexMap::default(),
+            res: Ok(Value::ID("rwlock", id)),
+        });
+
+        Box::new(DebugIORawRwLock {
+            id,
+            inner: self.inner.create_raw_rwlock(),
             state,
         })
     }
@@ -420,6 +447,62 @@ impl IOBlock for DebugIOBlock {
             },
             f: |inner, id| {
                 let inner = inner.lock(lock.inner.as_ref());
+                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
+            },
+            map_ok: |guard| {
+                let id = (guard.as_ref() as &dyn Any)
+                    .downcast_ref::<DebugIORawMutexGuard>()
+                    .expect("just created that type")
+                    .id;
+                Value::ID("guard", id)
+            },
+        })
+        .expect("never fails")
+    }
+
+    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
+        let lock = (raw_lock as &dyn Any)
+            .downcast_ref::<DebugIORawRwLock>()
+            .expect("wrong type");
+
+        self.event(Event {
+            fun: "lock_exlusive",
+            args: IndexMap::from([("rwlock", Value::ID("rwlock", lock.id))]),
+            state: |state| {
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                id
+            },
+            f: |inner, id| {
+                let inner = inner.lock_exclusive(lock.inner.as_ref());
+                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
+            },
+            map_ok: |guard| {
+                let id = (guard.as_ref() as &dyn Any)
+                    .downcast_ref::<DebugIORawMutexGuard>()
+                    .expect("just created that type")
+                    .id;
+                Value::ID("guard", id)
+            },
+        })
+        .expect("never fails")
+    }
+
+    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
+        let lock = (raw_lock as &dyn Any)
+            .downcast_ref::<DebugIORawRwLock>()
+            .expect("wrong type");
+
+        self.event(Event {
+            fun: "lock_shared",
+            args: IndexMap::from([("rwlock", Value::ID("rwlock", lock.id))]),
+            state: |state| {
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                id
+            },
+            f: |inner, id| {
+                let inner = inner.lock_shared(lock.inner.as_ref());
                 Ok(Box::new(DebugIORawMutexGuard { id, inner }))
             },
             map_ok: |guard| {
@@ -791,6 +874,85 @@ impl IORawMutex for DebugIORawMutex {
             fun: "unlock",
             args: IndexMap::from([
                 ("mutex", Value::ID("mutex", self.id)),
+                ("guard", Value::ID("guard", dbg_guard.id)),
+            ]),
+            res: Ok(Value::Unit),
+        });
+    }
+}
+
+struct DebugIORawRwLock {
+    id: u64,
+    inner: Box<dyn IORawRwLock>,
+    state: Arc<Mutex<State>>,
+}
+
+impl Drop for DebugIORawRwLock {
+    fn drop(&mut self) {
+        let mut guard = self.state.lock().unwrap();
+
+        let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
+        let block_id = SYNC_BLOCK_ID.get();
+
+        guard.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "destroy_rwlock",
+            args: IndexMap::from([("rwlock", Value::ID("rwlock", self.id))]),
+            res: Ok(Value::Unit),
+        });
+    }
+}
+
+impl IORawRwLock for DebugIORawRwLock {
+    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>) {
+        let dbg_guard = (guard as Box<dyn Any>)
+            .downcast::<DebugIORawMutexGuard>()
+            .expect("wrong type");
+
+        let mut guard2 = self.state.lock().unwrap();
+
+        // SAFETY: caller
+        unsafe {
+            self.inner.unlock_shared(dbg_guard.inner);
+        }
+
+        let task_id = SYNC_TASK_ID.get();
+        let block_id = SYNC_BLOCK_ID.get();
+
+        guard2.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "unlock_shared",
+            args: IndexMap::from([
+                ("rwlock", Value::ID("rwlock", self.id)),
+                ("guard", Value::ID("guard", dbg_guard.id)),
+            ]),
+            res: Ok(Value::Unit),
+        });
+    }
+
+    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>) {
+        let dbg_guard = (guard as Box<dyn Any>)
+            .downcast::<DebugIORawMutexGuard>()
+            .expect("wrong type");
+
+        let mut guard2 = self.state.lock().unwrap();
+
+        // SAFETY: caller
+        unsafe {
+            self.inner.unlock_exclusive(dbg_guard.inner);
+        }
+
+        let task_id = SYNC_TASK_ID.get();
+        let block_id = SYNC_BLOCK_ID.get();
+
+        guard2.log.push(LogEntry {
+            task_id,
+            block_id,
+            fun: "unlock_exclusive",
+            args: IndexMap::from([
+                ("rwlock", Value::ID("rwlock", self.id)),
                 ("guard", Value::ID("guard", dbg_guard.id)),
             ]),
             res: Ok(Value::Unit),
