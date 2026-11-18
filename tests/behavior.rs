@@ -254,7 +254,7 @@ async fn multipart_upload_state_error() {
 
             assert_matches!(
                 (after_op.f)(&mut upload).await.unwrap_err(),
-                Error::Generic { .. },
+                Error::Generic { source, .. } if source.to_string() == "upload no longer running",
             );
         }
     }
@@ -264,12 +264,14 @@ async fn multipart_upload_state_error() {
             continue;
         }
 
+        println!("{}.await while running", finish_op.name);
+
         let mut upload = storage.put_multipart(&loc).await.unwrap();
         let _f = upload.put_part(Default::default());
 
         assert_matches!(
             (finish_op.f)(&mut upload).await.unwrap_err(),
-            Error::Generic { .. },
+            Error::Generic { source, .. } if source.to_string() == "upload is still running",
         );
     }
 }
