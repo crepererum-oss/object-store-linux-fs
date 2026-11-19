@@ -49,6 +49,13 @@ Just don't. We will not support that madness.
 
 Sadly there isn't a good way to detect "is this file system or directory subject to case-folding" from userspace. So you've been warned!
 
+### Closing File Descriptors
+Technically [`close`] can fail. Since we [`fsync`] after writing and before closing and we assume that file systems aren't entirely broken, we ignore that fact. To quote [`rustix`]:
+
+> This function does not return a `Result`, as it is the [responsibility](https://lwn.net/Articles/576518/) of filesystem designers to not return errors from [`close`]. Users who chose to use NFS or similar filesystems should take care to monitor for problems externally.
+>
+> ([ref](https://github.com/bytecodealliance/rustix/blob/ffa6ee556f54ef646c5cfc67afc72703ae3a7382/src/io/close.rs#L16-L21))
+
 ### Compare-And-Swap
 Object store offers a PUT method that has atomic compare-and-swap semantic. There is no way to replace-override with a file descriptor. Hence, we need to use directory-based locking to ensure the file doesn't change while we're at it.
 
@@ -125,6 +132,7 @@ Unless you explicitly state otherwise, any contribution you intentionally submit
 in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
 
 
+[`close`]: https://man.archlinux.org/man/close.2
 [`flock`]: https://man.archlinux.org/man/flock.2
 [`fstat`]: https://man.archlinux.org/man/core/man-pages/stat.2.en
 [`fsync`]: https://man.archlinux.org/man/fsync.2
@@ -136,5 +144,6 @@ in the Apache-2.0 license, shall be dual-licensed as above, without any addition
 [`object_store`]: https://github.com/apache/arrow-rs-object-store/
 [`openat2`]: https://man.archlinux.org/man/openat2.2
 [`renameat2`]: https://man.archlinux.org/man/renameat2.2
+[`rustix`]: https://github.com/bytecodealliance/rustix
 [`RWF_DONTCACHE`]: https://man.archlinux.org/man/preadv2.2#RWF_DONTCACHE
 [`statx`]: https://man.archlinux.org/man/statx.2
