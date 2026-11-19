@@ -14,11 +14,14 @@ use object_store::{
     MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
     PutResult, RenameOptions, RenameTargetMode, Result, UploadPart, path::Path,
 };
-use rustix::fs::{AtFlags, Mode};
+use rustix::fs::Mode;
 
 use crate::{
     attributes::read_attrs_from_fd,
-    constants::{OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS, STORE_NAME},
+    constants::{
+        AT_FLAGS_LINKAT, AT_FLAGS_UNLINKAT, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
+        STORE_NAME,
+    },
     error::IOErrorExt,
     io::{IOLayer, IORwLock, spawn_io},
     put::{PreparedPutOperation, RunningPutOperation},
@@ -316,7 +319,7 @@ impl ObjectStore for LinuxFS {
                     let dir_fd = state2.open_dir(io, dirs, OpenDirMode::Get)?;
 
                     let _lock_fd = flock_dir(io, dir_fd.as_ref()).into_other_err()?;
-                    io.unlinkat(dir_fd.as_ref(), file, AtFlags::empty())
+                    io.unlinkat(dir_fd.as_ref(), file, AT_FLAGS_UNLINKAT)
                         .into_get_err(&location)?;
                     io.fsync(dir_fd.as_ref()).into_other_err()?;
                     Ok(location)
@@ -394,7 +397,7 @@ impl ObjectStore for LinuxFS {
                         "",
                         to_dir_fd.as_ref(),
                         to_file,
-                        AtFlags::EMPTY_PATH,
+                        AT_FLAGS_LINKAT,
                     )
                     .into_put_err(&to)?;
                 }
@@ -453,13 +456,13 @@ impl ObjectStore for LinuxFS {
                         "",
                         to_dir_fd.as_ref(),
                         to_file,
-                        AtFlags::EMPTY_PATH,
+                        AT_FLAGS_LINKAT,
                     )
                     .into_put_err(&to)?;
                 }
             }
             if to != from {
-                io.unlinkat(from_dir_fd.as_ref(), from_file, AtFlags::empty())
+                io.unlinkat(from_dir_fd.as_ref(), from_file, AT_FLAGS_UNLINKAT)
                     .into_get_err(&from)?;
             }
 

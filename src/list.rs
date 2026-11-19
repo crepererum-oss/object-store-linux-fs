@@ -6,11 +6,12 @@ use object_store::{
     Error, ListResult, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path, PathPart},
 };
-use rustix::fs::{AtFlags, FileType, Mode};
+use rustix::fs::{FileType, Mode};
 
 use crate::{
     constants::{
-        GETDENTS_BUFFER_SIZE, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
+        AT_FLAGS_STATAT_WITH_PATH, GETDENTS_BUFFER_SIZE, OFLAGS_READ, RESOLVE_FLAGS,
+        STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
     io::{IOFD, spawn_io},
@@ -316,7 +317,11 @@ impl NextTask {
                                 (dir_fd, maybe_stat) =
                                     spawn_io(&state.options().io_layer, move |io| {
                                         let maybe_stat = io
-                                            .statat(dir_fd.as_ref(), &file_name, AtFlags::empty())
+                                            .statat(
+                                                dir_fd.as_ref(),
+                                                &file_name,
+                                                AT_FLAGS_STATAT_WITH_PATH,
+                                            )
                                             .into_list_err()
                                             .transpose()?;
                                         Ok((dir_fd, maybe_stat))

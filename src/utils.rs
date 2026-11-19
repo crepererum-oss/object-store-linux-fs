@@ -5,10 +5,13 @@ use object_store::{
     Error, ObjectMeta, Result,
     path::{DELIMITER_CHAR, Path},
 };
-use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, RenameFlags, Stat};
+use rustix::fs::{FileType, FlockOperation, Mode, RenameFlags, Stat};
 
 use crate::{
-    constants::{OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME},
+    constants::{
+        AT_FLAGS_LINKAT, AT_FLAGS_UNLINKAT, OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS,
+        STAGING_FILE_PREFIX, STORE_NAME,
+    },
     error::IOErrorExt,
     io::{IOBlock, IOFD},
     state::State,
@@ -144,7 +147,7 @@ pub(crate) fn link_at_replace(
 
     // set up staging file
     let staging_file = staging_file_name(io, file);
-    io.linkat(file_fd, "", dir_fd, &staging_file, AtFlags::EMPTY_PATH)?;
+    io.linkat(file_fd, "", dir_fd, &staging_file, AT_FLAGS_LINKAT)?;
 
     // rename to target
     let rename_res = io.renameat2(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
@@ -153,7 +156,7 @@ pub(crate) fn link_at_replace(
     //
     // Note that this might be required even if renameat2 succeeded because when "from" and "to" are the same inode, it
     // just doesn't do anything.
-    let unlink_res = match io.unlinkat(dir_fd, &staging_file, AtFlags::empty()) {
+    let unlink_res = match io.unlinkat(dir_fd, &staging_file, AT_FLAGS_UNLINKAT) {
         Ok(()) => Ok(()),
         Err(rustix::io::Errno::NOENT) => {
             // file gone, that's what we wanted

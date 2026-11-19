@@ -1,9 +1,28 @@
 //! Constants that are used throughout the project.
 
 use rustix::{
-    fs::{Mode, OFlags, ResolveFlags},
+    fs::{AtFlags, Mode, OFlags, ResolveFlags},
     io::ReadWriteFlags,
 };
+
+/// [`AtFlags`] for [`linkat`](https://man.archlinux.org/man/linkat.2).
+///
+/// Set:
+///
+/// - [`AT_EMPTY_PATH`](https://man.archlinux.org/man/linkat.2#AT_EMPTY_PATH)
+pub(crate) const AT_FLAGS_LINKAT: AtFlags = AtFlags::EMPTY_PATH;
+
+/// [`AtFlags`] for [`statat`](https://man.archlinux.org/man/core/man-pages/stat.2) with a valid path.
+///
+/// Set:
+///
+/// - [`AT_SYMLINK_NOFOLLOW`](https://man.archlinux.org/man/core/man-pages/stat.2#AT_SYMLINK_NOFOLLOW)
+pub(crate) const AT_FLAGS_STATAT_WITH_PATH: AtFlags = AtFlags::SYMLINK_NOFOLLOW;
+
+/// [`AtFlags`] for [`unlinkat`](https://man.archlinux.org/man/unlinkat.2)
+///
+/// It is empty.
+pub(crate) const AT_FLAGS_UNLINKAT: AtFlags = AtFlags::empty();
 
 /// Default buffer size for [`getdents`](https://man.archlinux.org/man/getdents.2)
 pub(crate) const GETDENTS_BUFFER_SIZE: usize = 1024;

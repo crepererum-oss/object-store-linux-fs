@@ -4,12 +4,13 @@ use object_store::{
     Attributes, Error, ObjectMeta, PutMode, PutOptions, PutPayload, Result, UpdateVersion,
     path::Path,
 };
-use rustix::fs::{AtFlags, Mode, XattrFlags};
+use rustix::fs::{Mode, XattrFlags};
 
 use crate::{
     attributes::attr_to_xattr,
     constants::{
-        MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS, RESOLVE_FLAGS,
+        AT_FLAGS_LINKAT, MODE_FILE_CREATE, OFLAGS_FILE_CREATE, OFLAGS_READ, READ_WRITE_FLAGS,
+        RESOLVE_FLAGS,
     },
     error::IOErrorExt,
     io::{IOBlock, IOFD, spawn_io},
@@ -171,7 +172,7 @@ impl RunningPutOperation {
                     "",
                     dir_fd.as_ref(),
                     &file,
-                    AtFlags::EMPTY_PATH,
+                    AT_FLAGS_LINKAT,
                 )
                 .into_put_err(&location)?;
             }
