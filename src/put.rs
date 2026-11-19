@@ -202,14 +202,21 @@ impl RunningPutOperation {
 
                 let existing_stat = io.fstat(existing_fd.as_ref()).into_get_err(&location)?;
                 let existing_meta = stat_to_meta(existing_stat, location.clone(), open_dir_mode)?;
-                let existing_etag = existing_meta
-                    .e_tag
-                    .expect("fs implementation always provides etag");
-                if existing_etag != e_tag {
+                let existing_etag = existing_meta.e_tag;
+                if existing_etag.as_ref() != Some(&e_tag) {
                     return Err(Error::Precondition {
                         path: location.to_string(),
-                        source: format!("requested etag='{}', got etag={}", e_tag, existing_etag,)
-                            .into(),
+                        source: format!(
+                            "requested etag='{}', got etag={}",
+                            e_tag,
+                            std::fmt::from_fn(|f| {
+                                match &existing_etag {
+                                    Some(etag) => write!(f, "'{etag}'"),
+                                    None => write!(f, "<missing>"),
+                                }
+                            }),
+                        )
+                        .into(),
                     });
                 }
 
