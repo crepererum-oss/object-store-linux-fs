@@ -16,6 +16,8 @@ This is an alternative to the builtin [`LocalFileSystem`], which is suffering fr
 - [PR#891 -- remove the staging file when publishing it fails](https://github.com/apache/arrow-rs-object-store/pull/891)
 - [PR#892 -- fsync directories a failed durable creation left unsynced](https://github.com/apache/arrow-rs-object-store/pull/892)
 
+On top of this, I believe that this crate has more thorough testing.
+
 ## Constraints
 This should work similarly to the existing local object store:
 
