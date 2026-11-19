@@ -65,6 +65,7 @@ async fn simple_create_put_drop() {
     T2 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
     T2 B2 linkat(old_dirfd: fd#1, old_path: "", new_dirfd: fd#0, new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
     T2 B2 renameat2(old_dirfd: fd#0, old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: fd#0, new_path: "x", flags: <empty>) -> Ok(())
+    T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 unlinkat(dirfd: fd#0, path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: <empty>) -> Err(No such file or directory (os error 2))
     T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 fstat(fd: fd#1) -> Ok(...)
@@ -174,6 +175,7 @@ async fn complex_put() {
     T2 B2 uuid() -> Ok("00000000-0000-0000-0000-000000000000")
     T2 B2 linkat(old_dirfd: fd#1, old_path: "", new_dirfd: fd#0, new_path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: EMPTY_PATH) -> Ok(())
     T2 B2 renameat2(old_dirfd: fd#0, old_path: ".staging.x.00000000-0000-0000-0000-000000000000", new_dirfd: fd#0, new_path: "x", flags: <empty>) -> Ok(())
+    T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 unlinkat(dirfd: fd#0, path: ".staging.x.00000000-0000-0000-0000-000000000000", flags: <empty>) -> Err(No such file or directory (os error 2))
     T2 B2 fsync(fd: fd#0) -> Ok(())
     T2 B2 fstat(fd: fd#1) -> Ok(...)
@@ -466,6 +468,60 @@ async fn race_source_overwrite(rename: bool) {
             .unwrap()
             .as_ref(),
         b"new",
+    );
+}
+
+#[tokio::test]
+async fn rename_across_directories_syncs_destination_before_unlinking_source() {
+    let from = Path::from("src/source");
+    let to = Path::from("dst/destination");
+    let fixture = Fixture::new([], async |storage| {
+        storage
+            .put(&from, PutPayload::from_static(b"source"))
+            .await
+            .unwrap();
+        storage
+            .put(&to, PutPayload::from_static(b"old destination"))
+            .await
+            .unwrap();
+    })
+    .await;
+
+    fixture.storage.rename(&from, &to).await.unwrap();
+
+    let entries = fixture.debugger.log_entries();
+    let published = entries
+        .iter()
+        .position(|entry| {
+            entry.fun == "renameat2"
+                && entry.args.get("new_path") == Some(&Value::String("destination".into()))
+                && entry.res.is_ok()
+        })
+        .expect("destination was not published");
+    let unlinked = entries
+        .iter()
+        .position(|entry| {
+            entry.fun == "unlinkat"
+                && entry.args.get("path") == Some(&Value::String("source".into()))
+                && entry.res.is_ok()
+        })
+        .expect("source was not unlinked");
+    let destination_dir = &entries[published].args["new_dirfd"];
+    let source_dir = &entries[unlinked].args["dirfd"];
+    assert_ne!(source_dir, destination_dir);
+
+    let synced = |entries: &[io_debugger::log::LogEntry], dir| {
+        entries.iter().any(|entry| {
+            entry.fun == "fsync" && entry.args.get("fd") == Some(dir) && entry.res.is_ok()
+        })
+    };
+    assert!(
+        published < unlinked && synced(&entries[published + 1..unlinked], destination_dir),
+        "rename must sync the destination directory after publishing and before unlinking the source"
+    );
+    assert!(
+        synced(&entries[unlinked + 1..], source_dir),
+        "rename must sync the source directory after unlinking the source"
     );
 }
 

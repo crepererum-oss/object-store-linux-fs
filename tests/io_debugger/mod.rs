@@ -82,6 +82,10 @@ impl DebugIOLayer {
         out
     }
 
+    pub fn log_entries(&self) -> Vec<LogEntry> {
+        self.state.lock().unwrap().log.clone()
+    }
+
     pub fn wipe_log(&self) {
         let mut guard = self.state.lock().unwrap();
         guard.log.clear();

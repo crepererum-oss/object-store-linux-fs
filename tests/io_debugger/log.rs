@@ -1,7 +1,7 @@
 use indexmap::{IndexMap, IndexSet};
 use rustix::io::Errno;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Flag {
     Know(&'static str),
     Unknown(u64),
@@ -16,7 +16,7 @@ impl std::fmt::Display for Flag {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Ellipsis,
     Flags(IndexSet<Flag>),
@@ -67,7 +67,7 @@ impl std::fmt::Display for Value {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     pub task_id: Option<u64>,
     pub block_id: Option<u64>,

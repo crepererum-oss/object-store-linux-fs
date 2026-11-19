@@ -160,7 +160,11 @@ pub(crate) fn link_at_replace(
     // rename to target
     let rename_res = io.renameat2(dir_fd, &staging_file, dir_fd, file, RenameFlags::empty());
 
-    // need to clean up staging file
+    // We need to fsync before unlinkat, otherwise a later fsync may fail (or we crash before it) and then the
+    // `unlinkat` might become visible but the `renameat2` doesn't. Linux doesn't promise us that durability is ordered.
+    io.fsync(dir_fd)?;
+
+    // Need to clean up staging file.
     //
     // Note that this might be required even if renameat2 succeeded because when "from" and "to" are the same inode, it
     // just doesn't do anything.
