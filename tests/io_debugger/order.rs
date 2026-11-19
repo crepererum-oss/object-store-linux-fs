@@ -4,12 +4,18 @@ use indexmap::IndexMap;
 
 use crate::io_debugger::log::Value;
 
+#[derive(Debug)]
+pub enum Manipulation {
+    FailBefore(rustix::io::Errno),
+}
+
 #[derive(Debug, Default)]
 pub struct Matcher {
     pub task_id: Option<u64>,
     pub block_id: Option<u64>,
     pub fun: Option<&'static str>,
     pub args: IndexMap<&'static str, Value>,
+    pub manipulation: Option<Manipulation>,
 }
 
 #[derive(Debug)]
@@ -27,6 +33,7 @@ impl Call<'_> {
             block_id,
             fun,
             args,
+            manipulation: _,
         } = matcher;
 
         task_id
@@ -56,11 +63,14 @@ impl Order {
                 .unwrap_or_default()
         }) else {
             // no match found
-            return ArrangeGuard { inner: None };
+            return ArrangeGuard {
+                inner: None,
+                manipulation: None,
+            };
         };
 
         // wipe matcher
-        *matcher = None;
+        let matcher = matcher.take().expect("doesn't match on none");
 
         // unlock matchers
         drop(matches);
@@ -73,6 +83,7 @@ impl Order {
 
         ArrangeGuard {
             inner: Some((idx, guard, condvar)),
+            manipulation: matcher.manipulation,
         }
     }
 }
@@ -101,6 +112,13 @@ impl<const N: usize> From<[Matcher; N]> for Order {
 
 pub struct ArrangeGuard<'a> {
     inner: Option<(usize, MutexGuard<'a, usize>, &'a Condvar)>,
+    manipulation: Option<Manipulation>,
+}
+
+impl ArrangeGuard<'_> {
+    pub fn manipulation(&self) -> Option<&Manipulation> {
+        self.manipulation.as_ref()
+    }
 }
 
 impl Drop for ArrangeGuard<'_> {

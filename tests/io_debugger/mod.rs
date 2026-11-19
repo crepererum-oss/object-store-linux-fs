@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::io_debugger::{
     log::{LogEntry, Value},
-    order::Order,
+    order::{Manipulation, Order},
 };
 
 pub mod log;
@@ -235,7 +235,10 @@ impl DebugIOBlock {
         let data = state(&mut state_guard);
         drop(state_guard);
 
-        let res = f(self.inner.as_mut(), data);
+        let res = match arrange_guard.manipulation() {
+            None => f(self.inner.as_mut(), data),
+            Some(Manipulation::FailBefore(e)) => Err(*e),
+        };
 
         let mut state_guard = self.state.lock().unwrap();
         state_guard.log.push(LogEntry {
@@ -678,7 +681,7 @@ impl IOBlock for DebugIOBlock {
             .expect("wrong type");
 
         self.event(Event {
-            fun: "pread2",
+            fun: "preadv2",
             args: IndexMap::from([
                 ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),
@@ -703,7 +706,7 @@ impl IOBlock for DebugIOBlock {
             .expect("wrong type");
 
         self.event(Event {
-            fun: "pwrite2",
+            fun: "pwritev2",
             args: IndexMap::from([
                 ("fd", Value::ID("fd", fd.id)),
                 ("bufs", Value::Ellipsis),

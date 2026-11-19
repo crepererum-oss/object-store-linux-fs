@@ -1,4 +1,4 @@
-use std::{assert_matches, sync::Arc};
+use std::{assert_matches, num::NonZeroUsize, sync::Arc};
 
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -7,8 +7,14 @@ use object_store::{
     path::Path,
 };
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions, constants::STAGING_FILE_PREFIX};
+use rustix::io::Errno;
 
-use crate::io_debugger::{DebugIOLayer, log::Value, order::Matcher, with_task_id};
+use crate::io_debugger::{
+    DebugIOLayer,
+    log::Value,
+    order::{Manipulation, Matcher},
+    with_task_id,
+};
 
 mod io_debugger;
 
@@ -82,13 +88,24 @@ impl Fixture {
     where
         F: for<'a> AsyncFnOnce(&'a LinuxFS),
     {
+        Self::new_with_options(LinuxFSOptions::default(), order, f).await
+    }
+
+    async fn new_with_options<const N: usize, F>(
+        options: LinuxFSOptions,
+        order: [Matcher; N],
+        f: F,
+    ) -> Self
+    where
+        F: for<'a> AsyncFnOnce(&'a LinuxFS),
+    {
         let tempdir = tempfile::tempdir().unwrap();
         let debugger = Arc::new(DebugIOLayer::new().with_order(order.into()));
         let storage = LinuxFS::new(
             tempdir.path().to_path_buf(),
             LinuxFSOptions {
                 io_layer: Arc::clone(&debugger) as _,
-                ..Default::default()
+                ..options
             },
         )
         .await
@@ -150,7 +167,7 @@ async fn complex_put() {
     T2 B2 openat2(dirfd: fd#0, path: ".", oflags: DIRECTORY|NOFOLLOW|WRONLY|CLOEXEC|TMPFILE, mode: RUSR|WUSR|RGRP, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#1)
     T2 B2 fsetxattr(fd: fd#1, name: "user.content-type", value: ..., flags: CREATE) -> Ok(())
     T2 B2 fsetxattr(fd: fd#1, name: "user.md.custom-attr", value: ..., flags: CREATE) -> Ok(())
-    T2 B2 pwrite2(fd: fd#1, bufs: ..., offset: 0, flags: <empty>) -> Ok(6)
+    T2 B2 pwritev2(fd: fd#1, bufs: ..., offset: 0, flags: <empty>) -> Ok(6)
     T2 B2 fsync(fd: fd#1) -> Ok(())
     T2 B2 openat2(dirfd: fd#0, path: ".", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#2)
     T2 B2 flock(fd: fd#2, operation: ...) -> Ok(())
@@ -163,6 +180,63 @@ async fn complex_put() {
     T2 B2 close(fd: fd#1) -> Ok(())
     T2 B2 close(fd: fd#2) -> Ok(())
     T2 B2 block-end() -> Ok(())
+    "#,
+    );
+}
+
+#[tokio::test]
+async fn complex_get() {
+    let loc = Path::parse("x").unwrap();
+
+    let fixture = Fixture::new([], async |storage| {
+        storage
+            .put_opts(
+                &loc,
+                [Bytes::from_static(b"foo"), Bytes::from_static(b"bar")]
+                    .into_iter()
+                    .collect(),
+                PutOptions {
+                    attributes: [
+                        (Attribute::ContentType, "my-content"),
+                        (Attribute::Metadata("custom-attr".into()), "custom-value"),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    })
+    .await;
+
+    with_task_id(2, async {
+        let res = fixture.storage.get(&loc).await.unwrap();
+        res.bytes().await.unwrap();
+    })
+    .await;
+
+    insta::assert_snapshot!(
+        fixture.debugger.log(),
+        @r#"
+    T2 B3 block-start() -> Ok(())
+    T2 B3 lock(mutex: mutex#0) -> Ok(guard#1)
+    T2 B3 unlock(mutex: mutex#0, guard: guard#1) -> Ok(())
+    T2 B3 openat2(dirfd: fd#0, path: "x", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#3)
+    T2 B3 fstat(fd: fd#3) -> Ok(...)
+    T2 B3 flistxattr_query(fd: fd#3) -> Ok(55)
+    T2 B3 flistxattr(fd: fd#3, list: ...) -> Ok(...)
+    T2 B3 fgetxattr_query(fd: fd#3, name: "user.content-type") -> Ok(10)
+    T2 B3 fgetxattr(fd: fd#3, name: "user.content-type", value: ...) -> Ok(...)
+    T2 B3 fgetxattr_query(fd: fd#3, name: "user.md.custom-attr") -> Ok(12)
+    T2 B3 fgetxattr(fd: fd#3, name: "user.md.custom-attr", value: ...) -> Ok(...)
+    T2 B3 block-end() -> Ok(())
+    T2 B4 block-start() -> Ok(())
+    T2 B4 preadv2(fd: fd#3, bufs: ..., offset: 0, flags: <empty>) -> Ok(6)
+    T2 B4 block-end() -> Ok(())
+    T2 B5 block-start() -> Ok(())
+    T2 B5 close(fd: fd#3) -> Ok(())
+    T2 B5 block-end() -> Ok(())
     "#,
     );
 }
@@ -658,4 +732,130 @@ async fn race_rejected_update_does_not_block_create() {
         .await
         .unwrap();
     assert_eq!(actual.as_ref(), b"created");
+}
+
+#[tokio::test]
+async fn interrupt_get() {
+    let loc = Path::parse("x").unwrap();
+
+    let fixture = Fixture::new_with_options(
+        LinuxFSOptions {
+            read_buffer_size: NonZeroUsize::new(1).unwrap(),
+            ..Default::default()
+        },
+        [
+            Matcher {
+                task_id: Some(2),
+                fun: Some("preadv2"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("preadv2"),
+                manipulation: Some(Manipulation::FailBefore(Errno::INTR)),
+                ..Default::default()
+            },
+        ],
+        async |storage| {
+            storage
+                .put(&loc, PutPayload::from_static(b"foo"))
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    with_task_id(2, async {
+        let res = fixture.storage.get(&loc).await.unwrap();
+        let bytes = res.bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), b"foo");
+    })
+    .await;
+
+    insta::assert_snapshot!(
+        fixture.debugger.log(),
+        @r#"
+    T2 B3 block-start() -> Ok(())
+    T2 B3 lock(mutex: mutex#0) -> Ok(guard#1)
+    T2 B3 unlock(mutex: mutex#0, guard: guard#1) -> Ok(())
+    T2 B3 openat2(dirfd: fd#0, path: "x", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#3)
+    T2 B3 fstat(fd: fd#3) -> Ok(...)
+    T2 B3 flistxattr_query(fd: fd#3) -> Ok(17)
+    T2 B3 flistxattr(fd: fd#3, list: ...) -> Ok(...)
+    T2 B3 block-end() -> Ok(())
+    T2 B4 block-start() -> Ok(())
+    T2 B4 preadv2(fd: fd#3, bufs: ..., offset: 0, flags: <empty>) -> Ok(1)
+    T2 B4 block-end() -> Ok(())
+    T2 B5 block-start() -> Ok(())
+    T2 B5 preadv2(fd: fd#3, bufs: ..., offset: 1, flags: <empty>) -> Err(Interrupted system call (os error 4))
+    T2 B5 preadv2(fd: fd#3, bufs: ..., offset: 1, flags: <empty>) -> Ok(1)
+    T2 B5 block-end() -> Ok(())
+    T2 B6 block-start() -> Ok(())
+    T2 B6 preadv2(fd: fd#3, bufs: ..., offset: 2, flags: <empty>) -> Ok(1)
+    T2 B6 block-end() -> Ok(())
+    T2 B7 block-start() -> Ok(())
+    T2 B7 close(fd: fd#3) -> Ok(())
+    T2 B7 block-end() -> Ok(())
+    "#,
+    );
+}
+
+#[tokio::test]
+async fn interrupt_get_ranges() {
+    let loc = Path::parse("x").unwrap();
+
+    let fixture = Fixture::new_with_options(
+        LinuxFSOptions {
+            read_buffer_size: NonZeroUsize::new(1).unwrap(),
+            ..Default::default()
+        },
+        [
+            Matcher {
+                task_id: Some(2),
+                fun: Some("preadv2"),
+                ..Default::default()
+            },
+            Matcher {
+                task_id: Some(2),
+                fun: Some("preadv2"),
+                manipulation: Some(Manipulation::FailBefore(Errno::INTR)),
+                ..Default::default()
+            },
+        ],
+        async |storage| {
+            storage
+                .put(&loc, PutPayload::from_static(b"fox"))
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    with_task_id(2, async {
+        let bytes = fixture
+            .storage
+            .get_ranges(&loc, &[0..2, 1..3])
+            .await
+            .unwrap();
+        assert_eq!(bytes.len(), 2);
+        assert_eq!(bytes[0].as_ref(), b"fo");
+        assert_eq!(bytes[1].as_ref(), b"ox");
+    })
+    .await;
+
+    insta::assert_snapshot!(
+        fixture.debugger.log(),
+        @r#"
+    T2 B3 block-start() -> Ok(())
+    T2 B3 lock(mutex: mutex#0) -> Ok(guard#1)
+    T2 B3 unlock(mutex: mutex#0, guard: guard#1) -> Ok(())
+    T2 B3 openat2(dirfd: fd#0, path: "x", oflags: NOFOLLOW|CLOEXEC, mode: <empty>, resolve: NO_XDEV|NO_MAGICLINKS|NO_SYMLINKS|BENEATH) -> Ok(fd#3)
+    T2 B3 fstat(fd: fd#3) -> Ok(...)
+    T2 B3 preadv2(fd: fd#3, bufs: ..., offset: 0, flags: <empty>) -> Ok(2)
+    T2 B3 preadv2(fd: fd#3, bufs: ..., offset: 1, flags: <empty>) -> Err(Interrupted system call (os error 4))
+    T2 B3 preadv2(fd: fd#3, bufs: ..., offset: 1, flags: <empty>) -> Ok(2)
+    T2 B3 close(fd: fd#3) -> Ok(())
+    T2 B3 block-end() -> Ok(())
+    "#,
+    );
 }
