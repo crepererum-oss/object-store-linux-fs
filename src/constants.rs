@@ -79,6 +79,11 @@ pub(crate) const OFLAGS_READ: OFlags = OFlags::CLOEXEC
     .union(OFlags::NOFOLLOW)
     .union(OFlags::RDONLY);
 
+/// `mtime` values that are considered placeholders, i.e. they cannot be used to determine an ETag.
+///
+/// See <https://github.com/caddyserver/caddy/issues/5548>.
+pub(crate) const PLACEHOLDER_MTIME_VALUES: &[i64] = &[0, 1];
+
 /// [`ReadWriteFlags`] used for [`preadv2`]/[`pwritev2`]
 ///
 /// This is currently empty.

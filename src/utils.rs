@@ -9,8 +9,8 @@ use rustix::fs::{FileType, FlockOperation, Mode, RenameFlags, Stat};
 
 use crate::{
     constants::{
-        AT_FLAGS_LINKAT, AT_FLAGS_UNLINKAT, OFLAGS_DIR, OFLAGS_READ, RESOLVE_FLAGS,
-        STAGING_FILE_PREFIX, STORE_NAME,
+        AT_FLAGS_LINKAT, AT_FLAGS_UNLINKAT, OFLAGS_DIR, OFLAGS_READ, PLACEHOLDER_MTIME_VALUES,
+        RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
     io::{IOBlock, IOFD},
@@ -125,7 +125,15 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path, mode: OpenDirMode) -> Res
                 source: "cannot read mtime".to_owned().into(),
             })?,
         size: stat.st_size as _,
-        e_tag: Some(stat.st_ino.to_string()),
+        e_tag: (!PLACEHOLDER_MTIME_VALUES.contains(&stat.st_mtime)).then(|| {
+            format!(
+                "{inode}-{mtime}.{mtime_nsec}-{size}",
+                inode = stat.st_ino,
+                mtime = stat.st_mtime,
+                mtime_nsec = stat.st_mtime_nsec,
+                size = stat.st_size,
+            )
+        }),
         version: None,
     })
 }
