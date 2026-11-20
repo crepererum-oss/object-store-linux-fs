@@ -144,11 +144,11 @@ where
                 )
                 .into_get_err(&location)?;
 
-            let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
+            let stat = io.fstat(&file_fd).into_get_err(&location)?;
             let meta = stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
             options.check_preconditions(&meta)?;
 
-            let attributes = read_attrs_from_fd(io, file_fd.as_ref()).into_get_err(&location)?;
+            let attributes = read_attrs_from_fd(io, &file_fd).into_get_err(&location)?;
 
             let range = match options.range {
                 None => 0..meta.size,
@@ -185,7 +185,7 @@ where
                                 let to_read = buf.len().min(whats_left);
                                 let got = rustix::io::retry_on_intr(|| {
                                     io.preadv2(
-                                        file_fd.as_ref(),
+                                        &file_fd,
                                         &mut [IoSliceMut::new(&mut buf[..to_read])],
                                         offset as _,
                                         READ_WRITE_FLAGS,
@@ -244,7 +244,7 @@ where
                 )
                 .into_get_err(&location)?;
 
-            let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
+            let stat = io.fstat(&file_fd).into_get_err(&location)?;
             let meta = stat_to_meta(stat, location.clone(), OpenDirMode::Get)?;
 
             let mut bytes_vec = Vec::with_capacity(ranges.len());
@@ -272,7 +272,7 @@ where
 
                     let got = rustix::io::retry_on_intr(|| {
                         io.preadv2(
-                            file_fd.as_ref(),
+                            &file_fd,
                             &mut [IoSliceMut::new(
                                 &mut buffer[buffer_offset..(buffer_offset + to_read as usize)],
                             )],
@@ -381,23 +381,16 @@ where
                 )
                 .into_get_err(&from)?;
 
-            let stat = io.fstat(file_fd.as_ref()).into_get_err(&from)?;
+            let stat = io.fstat(&file_fd).into_get_err(&from)?;
             stat_to_meta(stat, from.clone(), OpenDirMode::Get)?;
 
             match mode {
                 CopyMode::Overwrite => {
-                    link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_put_err(&to)?;
+                    link_at_replace(io, &file_fd, to_dir_fd.as_ref(), to_file).into_put_err(&to)?;
                 }
                 CopyMode::Create => {
-                    io.linkat(
-                        file_fd.as_ref(),
-                        "",
-                        to_dir_fd.as_ref(),
-                        to_file,
-                        AT_FLAGS_LINKAT,
-                    )
-                    .into_put_err(&to)?;
+                    io.linkat(&file_fd, "", to_dir_fd.as_ref(), to_file, AT_FLAGS_LINKAT)
+                        .into_put_err(&to)?;
                 }
             }
             io.fsync(to_dir_fd.as_ref()).into_other_err()?;
@@ -440,23 +433,16 @@ where
                 )
                 .into_get_err(&from)?;
 
-            let stat = io.fstat(file_fd.as_ref()).into_get_err(from.as_ref())?;
+            let stat = io.fstat(&file_fd).into_get_err(from.as_ref())?;
             stat_to_meta(stat, from.clone(), OpenDirMode::Get)?;
 
             match target_mode {
                 RenameTargetMode::Overwrite => {
-                    link_at_replace(io, file_fd.as_ref(), to_dir_fd.as_ref(), to_file)
-                        .into_put_err(&to)?;
+                    link_at_replace(io, &file_fd, to_dir_fd.as_ref(), to_file).into_put_err(&to)?;
                 }
                 RenameTargetMode::Create => {
-                    io.linkat(
-                        file_fd.as_ref(),
-                        "",
-                        to_dir_fd.as_ref(),
-                        to_file,
-                        AT_FLAGS_LINKAT,
-                    )
-                    .into_put_err(&to)?;
+                    io.linkat(&file_fd, "", to_dir_fd.as_ref(), to_file, AT_FLAGS_LINKAT)
+                        .into_put_err(&to)?;
                 }
             }
             if to != from {

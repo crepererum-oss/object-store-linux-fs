@@ -3,10 +3,7 @@ use std::{borrow::Cow, mem::MaybeUninit};
 use object_store::{Attribute, Attributes, Error, Result};
 use rustix::io::Errno;
 
-use crate::{
-    constants::STORE_NAME,
-    io::{IOBlock, IOFD},
-};
+use crate::{constants::STORE_NAME, io::IOBlock};
 
 pub(crate) fn attr_to_xattr(attr: &Attribute) -> Result<Cow<'static, str>> {
     match attr {
@@ -46,7 +43,10 @@ fn xattr_to_attr(attr: &str) -> Option<Attribute> {
     }
 }
 
-pub(crate) fn read_attrs_from_fd(io: &mut dyn IOBlock, fd: &dyn IOFD) -> Result<Attributes, Errno> {
+pub(crate) fn read_attrs_from_fd<B>(io: &mut B, fd: &B::FD) -> Result<Attributes, Errno>
+where
+    B: IOBlock,
+{
     let names_len = io.flistxattr_query(fd)?;
     let mut buffer_names = vec![MaybeUninit::uninit(); names_len];
     let (init, _uinit) = io.flistxattr(fd, &mut buffer_names)?;

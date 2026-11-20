@@ -28,7 +28,9 @@ pub use raw::RawIOLayer;
 pub type DefaultIOLayer = RawIOLayer;
 
 pub trait IOLayer: Debug + Send + Sync + 'static {
-    type BlockPrepared: IOBlockPrepared;
+    type Block: IOBlock<FD = Self::FD>;
+    type BlockPrepared: IOBlockPrepared<Block = Self::Block>;
+    type FD: IOFD;
 
     fn prepare_block(&self) -> Self::BlockPrepared;
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
@@ -42,49 +44,51 @@ pub trait IOBlockPrepared: Send {
 }
 
 pub trait IOBlock {
+    type FD: IOFD;
+
     /// See <https://man.archlinux.org/man/core/man-pages/fgetxattr.2>.
     fn fgetxattr<'a>(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         name: &str,
         value: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fgetxattr.2>.
-    fn fgetxattr_query(&mut self, fd: &dyn IOFD, name: &str) -> Result<usize, Errno>;
+    fn fgetxattr_query(&mut self, fd: &Self::FD, name: &str) -> Result<usize, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/flistxattr.2>.
     fn flistxattr<'a>(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         list: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/flistxattr.2>.
-    fn flistxattr_query(&mut self, fd: &dyn IOFD) -> Result<usize, Errno>;
+    fn flistxattr_query(&mut self, fd: &Self::FD) -> Result<usize, Errno>;
 
     /// See <https://man.archlinux.org/man/flock.2>.
-    fn flock(&mut self, fd: &dyn IOFD, operation: FlockOperation) -> Result<(), Errno>;
+    fn flock(&mut self, fd: &Self::FD, operation: FlockOperation) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fstat.2>.
-    fn fstat(&mut self, fd: &dyn IOFD) -> Result<Stat, Errno>;
+    fn fstat(&mut self, fd: &Self::FD) -> Result<Stat, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/fsetxattr.2>.
     fn fsetxattr(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         name: &str,
         value: &[u8],
         flags: XattrFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/fsync.2>.
-    fn fsync(&mut self, fd: &dyn IOFD) -> Result<(), Errno>;
+    fn fsync(&mut self, fd: &Self::FD) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/getdents.2>.
     fn getdents(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno>;
 
@@ -100,15 +104,15 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/linkat.2>.
     fn linkat(
         &mut self,
-        old_dirfd: &dyn IOFD,
+        old_dirfd: &Self::FD,
         old_path: &str,
-        new_dirfd: &dyn IOFD,
+        new_dirfd: &Self::FD,
         new_path: &str,
         flags: AtFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/mkdirat.2>.
-    fn mkdirat(&mut self, dirfd: &dyn IOFD, path: &str, mode: Mode) -> Result<(), Errno>;
+    fn mkdirat(&mut self, dirfd: &Self::FD, path: &str, mode: Mode) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/open.2>.
     fn open(
@@ -116,22 +120,22 @@ pub trait IOBlock {
         path: &std::path::Path,
         flags: OFlags,
         mode: Mode,
-    ) -> Result<Box<dyn IOFD>, Errno>;
+    ) -> Result<Self::FD, Errno>;
 
     /// See <https://man.archlinux.org/man/openat2.2>.
     fn openat2(
         &mut self,
-        dirfd: &dyn IOFD,
+        dirfd: &Self::FD,
         path: &str,
         oflags: OFlags,
         mode: Mode,
         resolve: ResolveFlags,
-    ) -> Result<Box<dyn IOFD>, Errno>;
+    ) -> Result<Self::FD, Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/preadv2.2>.
     fn preadv2(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         bufs: &mut [IoSliceMut<'_>],
         offset: u64,
         flags: ReadWriteFlags,
@@ -140,7 +144,7 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/core/man-pages/pwritev2.2>.
     fn pwritev2(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         bufs: &[IoSlice<'_>],
         offset: u64,
         flags: ReadWriteFlags,
@@ -149,18 +153,18 @@ pub trait IOBlock {
     /// See <https://man.archlinux.org/man/renameat2.2>.
     fn renameat2(
         &mut self,
-        old_dirfd: &dyn IOFD,
+        old_dirfd: &Self::FD,
         old_path: &str,
-        new_dirfd: &dyn IOFD,
+        new_dirfd: &Self::FD,
         new_path: &str,
         flags: RenameFlags,
     ) -> Result<(), Errno>;
 
     /// See <https://man.archlinux.org/man/core/man-pages/stat.2>.
-    fn statat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<Stat, Errno>;
+    fn statat(&mut self, dirfd: &Self::FD, path: &str, flags: AtFlags) -> Result<Stat, Errno>;
 
     /// See <https://man.archlinux.org/man/unlinkat.2>.
-    fn unlinkat(&mut self, dirfd: &dyn IOFD, path: &str, flags: AtFlags) -> Result<(), Errno>;
+    fn unlinkat(&mut self, dirfd: &Self::FD, path: &str, flags: AtFlags) -> Result<(), Errno>;
 
     /// Generate unique UUID,
     fn uuid(&mut self) -> Uuid;
@@ -184,13 +188,15 @@ pub trait IORawRwLock: Any + Send + Sync {
     unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>);
 }
 
-pub trait IOFD: Any + Debug + Send + Sync {}
+pub trait IOFD: Debug + Send + Sync {}
 
 impl<T> IOLayer for Arc<T>
 where
     T: ?Sized + IOLayer,
 {
+    type Block = T::Block;
     type BlockPrepared = T::BlockPrepared;
+    type FD = T::FD;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         self.as_ref().prepare_block()
@@ -208,11 +214,7 @@ where
 pub(crate) async fn spawn_io<IO, F, R>(io_layer: &IO, f: F) -> Result<R, object_store::Error>
 where
     IO: IOLayer,
-    F: for<'a> FnOnce(
-            &'a mut <<IO as IOLayer>::BlockPrepared as IOBlockPrepared>::Block,
-        ) -> Result<R, object_store::Error>
-        + Send
-        + 'static,
+    F: for<'a> FnOnce(&'a mut IO::Block) -> Result<R, object_store::Error> + Send + 'static,
     R: Send + 'static,
 {
     let mut prepared = io_layer.prepare_block();
@@ -250,7 +252,10 @@ impl<T> IOMutex<T> {
         }
     }
 
-    pub(crate) fn lock(&self, io: &mut dyn IOBlock) -> IOMutexGuard<'_, T> {
+    pub(crate) fn lock<B>(&self, io: &mut B) -> IOMutexGuard<'_, T>
+    where
+        B: IOBlock,
+    {
         let guard = io.lock(self.raw.as_ref());
 
         IOMutexGuard {
@@ -317,7 +322,10 @@ impl<T> IORwLock<T> {
         }
     }
 
-    pub(crate) fn read(&self, io: &mut dyn IOBlock) -> IORwLockReadGuard<'_, T> {
+    pub(crate) fn read<B>(&self, io: &mut B) -> IORwLockReadGuard<'_, T>
+    where
+        B: IOBlock,
+    {
         let guard = io.lock_shared(self.raw.as_ref());
 
         IORwLockReadGuard {
@@ -327,7 +335,10 @@ impl<T> IORwLock<T> {
         }
     }
 
-    pub(crate) fn write(&self, io: &mut dyn IOBlock) -> IORwLockWriteGuard<'_, T> {
+    pub(crate) fn write<B>(&self, io: &mut B) -> IORwLockWriteGuard<'_, T>
+    where
+        B: IOBlock,
+    {
         let guard = io.lock_exclusive(self.raw.as_ref());
 
         IORwLockWriteGuard {

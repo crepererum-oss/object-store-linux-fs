@@ -76,11 +76,14 @@ fn split_dirs_and_filename_str(location: &Path) -> (Option<&str>, &str) {
     }
 }
 
-pub(crate) fn open_dir_fd(
-    io: &mut dyn IOBlock,
-    parent: &dyn IOFD,
+pub(crate) fn open_dir_fd<B>(
+    io: &mut B,
+    parent: &B::FD,
     child: &str,
-) -> Result<Arc<dyn IOFD>, rustix::io::Errno> {
+) -> Result<Arc<B::FD>, rustix::io::Errno>
+where
+    B: IOBlock,
+{
     // we still need to fsync because the creating thread/process might die before that
     // TODO: introduce a read-only flag where we could skip this
     io.fsync(parent)?;
@@ -138,12 +141,15 @@ pub(crate) fn stat_to_meta(stat: Stat, location: Path, mode: OpenDirMode) -> Res
     })
 }
 
-pub(crate) fn link_at_replace(
-    io: &mut dyn IOBlock,
-    file_fd: &dyn IOFD,
-    dir_fd: &dyn IOFD,
+pub(crate) fn link_at_replace<B>(
+    io: &mut B,
+    file_fd: &B::FD,
+    dir_fd: &B::FD,
     file: &str,
-) -> Result<(), rustix::io::Errno> {
+) -> Result<(), rustix::io::Errno>
+where
+    B: IOBlock,
+{
     // TODO: we cannot use `linkat` w/ replacement, see
     //       https://uapi-group.org/kernel-features/#linking-of-o_tmpfile-files-with-replacement
     //
@@ -180,17 +186,20 @@ pub(crate) fn link_at_replace(
     rename_res.and(unlink_res)
 }
 
-fn staging_file_name(io: &mut dyn IOBlock, filename: &str) -> String {
+fn staging_file_name<B>(io: &mut B, filename: &str) -> String
+where
+    B: IOBlock,
+{
     let uuid = io.uuid();
 
     // NOTE: the prefix already contains a `.`, so we don't need yet another one
     format!("{STAGING_FILE_PREFIX}{filename}.{uuid}")
 }
 
-pub(crate) fn flock_dir(
-    io: &mut dyn IOBlock,
-    dir_fd: &dyn IOFD,
-) -> Result<Box<dyn IOFD>, rustix::io::Errno> {
+pub(crate) fn flock_dir<B>(io: &mut B, dir_fd: &B::FD) -> Result<B::FD, rustix::io::Errno>
+where
+    B: IOBlock,
+{
     // TODO: There is no way to replace-override with a file descriptor. Hence we need to use
     //       directory-based locking to ensure the file doesn't change while we're at it. This is
     //       somewhat similar (but not identical) to:
@@ -201,26 +210,29 @@ pub(crate) fn flock_dir(
     // `flock`ing-the same file/directory descriptor twice doesn't block and we have other threads
     // using the descriptor. Hence we need to re-open the descriptor (note that `dup` does NOT work!).
     let lock_fd = io.openat2(dir_fd, ".", OFLAGS_READ, Mode::empty(), RESOLVE_FLAGS)?;
-    io.flock(lock_fd.as_ref(), FlockOperation::LockExclusive)?;
+    io.flock(&lock_fd, FlockOperation::LockExclusive)?;
 
     Ok(lock_fd)
 }
 
-pub(crate) struct TransferFDs<'a> {
-    pub(crate) from_dir_fd: Arc<dyn IOFD>,
-    pub(crate) from_lock_fd: Option<Box<dyn IOFD>>,
+pub(crate) struct TransferFDs<'a, FD>
+where
+    FD: IOFD,
+{
+    pub(crate) from_dir_fd: Arc<FD>,
+    pub(crate) from_lock_fd: Option<FD>,
     pub(crate) from_file: &'a str,
-    pub(crate) to_dir_fd: Arc<dyn IOFD>,
-    pub(crate) to_lock_fd: Option<Box<dyn IOFD>>,
+    pub(crate) to_dir_fd: Arc<FD>,
+    pub(crate) to_lock_fd: Option<FD>,
     pub(crate) to_file: &'a str,
 }
 
 pub(crate) fn prepare_transfer_dirs<'a, IO>(
-    io: &mut dyn IOBlock,
+    io: &mut IO::Block,
     from: &'a Path,
     to: &'a Path,
     state: &State<IO>,
-) -> Result<TransferFDs<'a>, Error>
+) -> Result<TransferFDs<'a, IO::FD>, Error>
 where
     IO: IOLayer,
 {

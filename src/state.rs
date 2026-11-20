@@ -11,7 +11,7 @@ use crate::{
     LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    io::{IOBlock, IOFD, IOLayer, IOMutex, spawn_io},
+    io::{IOBlock, IOLayer, IOMutex, spawn_io},
     utils::{OpenDirMode, open_dir_fd},
 };
 
@@ -21,7 +21,7 @@ where
     IO: IOLayer,
 {
     root: PathBuf,
-    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<dyn IOFD>>>,
+    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<IO::FD>>>,
     options: LinuxFSOptions<IO>,
 }
 
@@ -51,10 +51,10 @@ where
 
     pub(crate) fn open_dir<'a>(
         &self,
-        io: &mut dyn IOBlock,
+        io: &mut IO::Block,
         dirs: impl Iterator<Item = Result<&'a str>>,
         mode: OpenDirMode,
-    ) -> Result<Arc<dyn IOFD>> {
+    ) -> Result<Arc<IO::FD>> {
         let mut dir_fd_cache = self.dir_fd_cache.lock(io);
         let mut path = self.root.clone();
         let mut prefix = Path::ROOT;

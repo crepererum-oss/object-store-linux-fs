@@ -11,14 +11,17 @@ use parking_lot::Mutex;
 
 use crate::{
     constants::STORE_NAME,
-    io::{IOLayer, IORwLock, spawn_io},
+    io::{IOFD, IOLayer, IORwLock, spawn_io},
     put::{PreparedPutOperation, RunningPutOperation},
     state::State,
 };
 
 #[derive(Debug)]
-enum UploadState {
-    Running { op: RunningPutOperation },
+enum UploadState<FD>
+where
+    FD: IOFD,
+{
+    Running { op: RunningPutOperation<FD> },
     Finished { broken: bool },
 }
 
@@ -58,7 +61,7 @@ pub(crate) struct LinuxFSUpload<IO>
 where
     IO: IOLayer,
 {
-    state: Arc<IORwLock<UploadState>>,
+    state: Arc<IORwLock<UploadState<IO::FD>>>,
 
     // NOTE: this does NOT count as an I/O lock because we don't do I/O during it
     parts: Arc<Mutex<UploadParts>>,

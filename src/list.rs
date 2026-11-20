@@ -130,14 +130,17 @@ where
     }
 }
 
-enum DirFd {
+enum DirFd<FD>
+where
+    FD: IOFD,
+{
     Eager {
         prefix: Option<Path>,
-        dir_fd: Arc<dyn IOFD>,
+        dir_fd: Arc<FD>,
     },
     Lazy {
         child_prefix: Path,
-        parent: Arc<dyn IOFD>,
+        parent: Arc<FD>,
         child: String,
     },
 }
@@ -147,13 +150,13 @@ where
     IO: IOLayer,
 {
     OpenDir {
-        dir_fds: Vec<DirFd>,
+        dir_fds: Vec<DirFd<IO::FD>>,
         state: Arc<State<IO>>,
         getdents_buffer: Vec<MaybeUninit<u8>>,
     },
     ReadNextEntry {
-        dir_fds: Vec<DirFd>,
-        dir_fd: Arc<dyn IOFD>,
+        dir_fds: Vec<DirFd<IO::FD>>,
+        dir_fd: Arc<IO::FD>,
         getdents_buffer: Vec<MaybeUninit<u8>>,
         prefix: Option<Path>,
         state: Arc<State<IO>>,

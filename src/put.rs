@@ -18,24 +18,30 @@ use crate::{
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
 
-pub(crate) struct PreparedPutOperation {
+pub(crate) struct PreparedPutOperation<FD>
+where
+    FD: IOFD,
+{
     location: Path,
     file: String,
-    dir_fd: Arc<dyn IOFD>,
+    dir_fd: Arc<FD>,
     mode: PutMode,
     open_dir_mode: OpenDirMode,
     attributes: Attributes,
 }
 
-impl PreparedPutOperation {
+impl<FD> PreparedPutOperation<FD>
+where
+    FD: IOFD,
+{
     pub(crate) fn new<IO>(
-        io: &mut dyn IOBlock,
+        io: &mut IO::Block,
         location: Path,
         opts: PutOptions,
         state: &Arc<State<IO>>,
     ) -> Result<Self>
     where
-        IO: IOLayer,
+        IO: IOLayer<FD = FD>,
     {
         let PutOptions {
             mode,
@@ -65,7 +71,10 @@ impl PreparedPutOperation {
         })
     }
 
-    pub(crate) fn blocking_io_start(self, io: &mut dyn IOBlock) -> Result<RunningPutOperation> {
+    pub(crate) fn blocking_io_start<B>(self, io: &mut B) -> Result<RunningPutOperation<FD>>
+    where
+        B: IOBlock<FD = FD>,
+    {
         let Self {
             location,
             file,
@@ -92,13 +101,8 @@ impl PreparedPutOperation {
             .collect::<Result<Vec<_>, _>>()?;
         attrs.sort_unstable_by(|(attr1, _attr_val1), (attr2, _attr_val2)| attr1.cmp(attr2));
         for (attr, attr_val) in attrs {
-            io.fsetxattr(
-                file_fd.as_ref(),
-                &attr,
-                attr_val.as_bytes(),
-                XattrFlags::CREATE,
-            )
-            .into_other_err()?;
+            io.fsetxattr(&file_fd, &attr, attr_val.as_bytes(), XattrFlags::CREATE)
+                .into_other_err()?;
         }
 
         Ok(RunningPutOperation {
@@ -113,22 +117,31 @@ impl PreparedPutOperation {
 }
 
 #[derive(Debug)]
-pub(crate) struct RunningPutOperation {
-    file_fd: Box<dyn IOFD>,
-    dir_fd: Arc<dyn IOFD>,
+pub(crate) struct RunningPutOperation<FD>
+where
+    FD: IOFD,
+{
+    file_fd: FD,
+    dir_fd: Arc<FD>,
     file: String,
     location: Path,
     mode: PutMode,
     open_dir_mode: OpenDirMode,
 }
 
-impl RunningPutOperation {
-    pub(crate) fn blocking_io_put(
+impl<FD> RunningPutOperation<FD>
+where
+    FD: IOFD,
+{
+    pub(crate) fn blocking_io_put<B>(
         &self,
-        io: &mut dyn IOBlock,
+        io: &mut B,
         payload: PutPayload,
         start_offset: usize,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        B: IOBlock<FD = FD>,
+    {
         let Self { file_fd, .. } = self;
 
         let mut slices = payload
@@ -141,7 +154,7 @@ impl RunningPutOperation {
         let mut offset = start_offset;
         while offset < start_offset + len {
             let written = io
-                .pwritev2(file_fd.as_ref(), slices, offset as _, READ_WRITE_FLAGS)
+                .pwritev2(file_fd, slices, offset as _, READ_WRITE_FLAGS)
                 .into_other_err()?;
             offset += written;
             IoSlice::advance_slices(&mut slices, written);
@@ -150,7 +163,10 @@ impl RunningPutOperation {
         Ok(())
     }
 
-    pub(crate) fn blocking_io_commit(self, io: &mut dyn IOBlock) -> Result<ObjectMeta> {
+    pub(crate) fn blocking_io_commit<B>(self, io: &mut B) -> Result<ObjectMeta>
+    where
+        B: IOBlock<FD = FD>,
+    {
         let Self {
             file_fd,
             dir_fd,
@@ -160,23 +176,17 @@ impl RunningPutOperation {
             open_dir_mode,
         } = self;
 
-        io.fsync(file_fd.as_ref()).into_other_err()?;
+        io.fsync(&file_fd).into_other_err()?;
 
         let lock_fd = flock_dir(io, dir_fd.as_ref()).into_other_err()?;
 
         match mode {
             PutMode::Overwrite => {
-                link_at_replace(io, file_fd.as_ref(), dir_fd.as_ref(), &file).into_other_err()?;
+                link_at_replace(io, &file_fd, dir_fd.as_ref(), &file).into_other_err()?;
             }
             PutMode::Create => {
-                io.linkat(
-                    file_fd.as_ref(),
-                    "",
-                    dir_fd.as_ref(),
-                    &file,
-                    AT_FLAGS_LINKAT,
-                )
-                .into_put_err(&location)?;
+                io.linkat(&file_fd, "", dir_fd.as_ref(), &file, AT_FLAGS_LINKAT)
+                    .into_put_err(&location)?;
             }
             PutMode::Update(UpdateVersion { e_tag, version }) => {
                 let Some(e_tag) = e_tag else {
@@ -202,7 +212,7 @@ impl RunningPutOperation {
                     )
                     .into_update_err(&location)?;
 
-                let existing_stat = io.fstat(existing_fd.as_ref()).into_get_err(&location)?;
+                let existing_stat = io.fstat(&existing_fd).into_get_err(&location)?;
                 let existing_meta = stat_to_meta(existing_stat, location.clone(), open_dir_mode)?;
                 let existing_etag = existing_meta.e_tag;
                 if existing_etag.as_ref() != Some(&e_tag) {
@@ -222,12 +232,12 @@ impl RunningPutOperation {
                     });
                 }
 
-                link_at_replace(io, file_fd.as_ref(), dir_fd.as_ref(), &file).into_other_err()?;
+                link_at_replace(io, &file_fd, dir_fd.as_ref(), &file).into_other_err()?;
             }
         }
         io.fsync(dir_fd.as_ref()).into_other_err()?;
 
-        let stat = io.fstat(file_fd.as_ref()).into_get_err(&location)?;
+        let stat = io.fstat(&file_fd).into_get_err(&location)?;
         let meta = stat_to_meta(stat, location, open_dir_mode)?;
 
         drop(file_fd);

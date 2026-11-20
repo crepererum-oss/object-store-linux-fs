@@ -2,6 +2,7 @@ use std::{
     any::Any,
     cell::Cell,
     fmt::Write,
+    marker::PhantomData,
     mem::MaybeUninit,
     sync::{Arc, Mutex},
 };
@@ -99,7 +100,9 @@ impl<IO> IOLayer for DebugIOLayer<IO>
 where
     IO: IOLayer,
 {
+    type Block = DebugIOBlock<IO::Block>;
     type BlockPrepared = DebugIOBlockPrepared<IO::BlockPrepared>;
+    type FD = DebugIOFD<IO::FD>;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         let mut guard = self.state.lock().unwrap();
@@ -235,10 +238,13 @@ impl<B> DebugIOBlock<B>
 where
     B: IOBlock,
 {
-    fn event<FState, D, FIO, T, O>(&mut self, evt: Event<FState, D, FIO, T, O>) -> Result<T, Errno>
+    fn event<FState, D, FIO, T, O>(
+        &mut self,
+        evt: Event<FState, D, FIO, T, O, B>,
+    ) -> Result<T, Errno>
     where
         FState: for<'a> FnOnce(&'a mut State) -> D,
-        FIO: for<'a> FnOnce(&'a mut dyn IOBlock, D) -> Result<T, Errno>,
+        FIO: for<'a> FnOnce(&'a mut B, D) -> Result<T, Errno>,
         O: for<'a> FnOnce(&'a T) -> Value,
     {
         let Event {
@@ -247,6 +253,7 @@ where
             state,
             f,
             map_ok,
+            phantom: _,
         } = evt;
 
         // wait for our turn BEFORE capturing the state lock
@@ -307,16 +314,14 @@ impl<B> IOBlock for DebugIOBlock<B>
 where
     B: IOBlock,
 {
+    type FD = DebugIOFD<B::FD>;
+
     fn fgetxattr<'a>(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         name: &str,
         value: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "fgetxattr",
             args: IndexMap::from([
@@ -325,16 +330,13 @@ where
                 ("value", Value::Ellipsis),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.fgetxattr(fd.inner.as_ref(), name, value),
+            f: |inner, ()| inner.fgetxattr(&fd.inner, name, value),
             map_ok: |_| Value::Ellipsis,
+            phantom: PhantomData,
         })
     }
 
-    fn fgetxattr_query(&mut self, fd: &dyn IOFD, name: &str) -> Result<usize, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
+    fn fgetxattr_query(&mut self, fd: &Self::FD, name: &str) -> Result<usize, Errno> {
         self.event(Event {
             fun: "fgetxattr_query",
             args: IndexMap::from([
@@ -342,48 +344,39 @@ where
                 ("name", Value::String(name.to_owned())),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.fgetxattr_query(fd.inner.as_ref(), name),
+            f: |inner, ()| inner.fgetxattr_query(&fd.inner, name),
             map_ok: |n| Value::Size(*n as _),
+            phantom: PhantomData,
         })
     }
 
     fn flistxattr<'a>(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         list: &'a mut [MaybeUninit<u8>],
     ) -> Result<(&'a mut [u8], &'a mut [MaybeUninit<u8>]), Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "flistxattr",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("list", Value::Ellipsis)]),
             state: |_| (),
-            f: |inner, ()| inner.flistxattr(fd.inner.as_ref(), list),
+            f: |inner, ()| inner.flistxattr(&fd.inner, list),
             map_ok: |_| Value::Ellipsis,
+            phantom: PhantomData,
         })
     }
 
-    fn flistxattr_query(&mut self, fd: &dyn IOFD) -> Result<usize, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
+    fn flistxattr_query(&mut self, fd: &Self::FD) -> Result<usize, Errno> {
         self.event(Event {
             fun: "flistxattr_query",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
             state: |_| (),
-            f: |inner, ()| inner.flistxattr_query(fd.inner.as_ref()),
+            f: |inner, ()| inner.flistxattr_query(&fd.inner),
             map_ok: |n| Value::Size(*n as _),
+            phantom: PhantomData,
         })
     }
 
-    fn flock(&mut self, fd: &dyn IOFD, operation: rustix::fs::FlockOperation) -> Result<(), Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
+    fn flock(&mut self, fd: &Self::FD, operation: rustix::fs::FlockOperation) -> Result<(), Errno> {
         self.event(Event {
             fun: "flock",
             args: IndexMap::from([
@@ -391,36 +384,30 @@ where
                 ("operation", Value::Ellipsis),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.flock(fd.inner.as_ref(), operation),
+            f: |inner, ()| inner.flock(&fd.inner, operation),
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
-    fn fstat(&mut self, fd: &dyn IOFD) -> Result<rustix::fs::Stat, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
+    fn fstat(&mut self, fd: &Self::FD) -> Result<rustix::fs::Stat, Errno> {
         self.event(Event {
             fun: "fstat",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
             state: |_| (),
-            f: |inner, ()| inner.fstat(fd.inner.as_ref()),
+            f: |inner, ()| inner.fstat(&fd.inner),
             map_ok: |_| Value::Ellipsis,
+            phantom: PhantomData,
         })
     }
 
     fn fsetxattr(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         name: &str,
         value: &[u8],
         flags: rustix::fs::XattrFlags,
     ) -> Result<(), Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "fsetxattr",
             args: IndexMap::from([
@@ -430,40 +417,35 @@ where
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.fsetxattr(fd.inner.as_ref(), name, value, flags),
+            f: |inner, ()| inner.fsetxattr(&fd.inner, name, value, flags),
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
-    fn fsync(&mut self, fd: &dyn IOFD) -> Result<(), Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
+    fn fsync(&mut self, fd: &Self::FD) -> Result<(), Errno> {
         self.event(Event {
             fun: "fsync",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id))]),
             state: |_| (),
-            f: |inner, ()| inner.fsync(fd.inner.as_ref()),
+            f: |inner, ()| inner.fsync(&fd.inner),
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
     fn getdents(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, rustix::fs::FileType)>, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "getdents",
             args: IndexMap::from([("fd", Value::ID("fd", fd.id)), ("buf", Value::Ellipsis)]),
             state: |_| (),
-            f: |inner, ()| inner.getdents(fd.inner.as_ref(), buf),
+            f: |inner, ()| inner.getdents(&fd.inner, buf),
             map_ok: |_| Value::Ellipsis,
+            phantom: PhantomData,
         })
     }
 
@@ -491,6 +473,7 @@ where
                     .id;
                 Value::ID("guard", id)
             },
+            phantom: PhantomData,
         })
         .expect("never fails")
     }
@@ -519,6 +502,7 @@ where
                     .id;
                 Value::ID("guard", id)
             },
+            phantom: PhantomData,
         })
         .expect("never fails")
     }
@@ -547,25 +531,19 @@ where
                     .id;
                 Value::ID("guard", id)
             },
+            phantom: PhantomData,
         })
         .expect("never fails")
     }
 
     fn linkat(
         &mut self,
-        old_dirfd: &dyn IOFD,
+        old_dirfd: &Self::FD,
         old_path: &str,
-        new_dirfd: &dyn IOFD,
+        new_dirfd: &Self::FD,
         new_path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<(), Errno> {
-        let old_dirfd = (old_dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-        let new_dirfd = (new_dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "linkat",
             args: IndexMap::from([
@@ -578,27 +556,24 @@ where
             state: |_| (),
             f: |inner, ()| {
                 inner.linkat(
-                    old_dirfd.inner.as_ref(),
+                    &old_dirfd.inner,
                     old_path,
-                    new_dirfd.inner.as_ref(),
+                    &new_dirfd.inner,
                     new_path,
                     flags,
                 )
             },
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
     fn mkdirat(
         &mut self,
-        dirfd: &dyn IOFD,
+        dirfd: &Self::FD,
         path: &str,
         mode: rustix::fs::Mode,
     ) -> Result<(), Errno> {
-        let dirfd = (dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "mkdirat",
             args: IndexMap::from([
@@ -607,8 +582,9 @@ where
                 ("mode", Value::flags(mode)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.mkdirat(dirfd.inner.as_ref(), path, mode),
+            f: |inner, ()| inner.mkdirat(&dirfd.inner, path, mode),
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
@@ -617,7 +593,7 @@ where
         path: &std::path::Path,
         flags: rustix::fs::OFlags,
         mode: rustix::fs::Mode,
-    ) -> Result<Box<dyn IOFD>, Errno> {
+    ) -> Result<Self::FD, Errno> {
         let state_arc = Arc::clone(&self.state);
 
         self.event(Event {
@@ -635,35 +611,25 @@ where
             f: |inner, id| {
                 let inner = inner.open(path, flags, mode)?;
 
-                Ok(Box::new(DebugIOFD {
+                Ok(DebugIOFD {
                     inner,
                     id,
                     state: state_arc,
-                }) as Box<dyn IOFD>)
+                })
             },
-            map_ok: |fd| {
-                Value::ID(
-                    "fd",
-                    (fd.as_ref() as &dyn Any)
-                        .downcast_ref::<DebugIOFD>()
-                        .expect("just created that type")
-                        .id,
-                )
-            },
+            map_ok: |fd| Value::ID("fd", fd.id),
+            phantom: PhantomData,
         })
     }
 
     fn openat2(
         &mut self,
-        dirfd: &dyn IOFD,
+        dirfd: &Self::FD,
         path: &str,
         oflags: rustix::fs::OFlags,
         mode: rustix::fs::Mode,
         resolve: rustix::fs::ResolveFlags,
-    ) -> Result<Box<dyn IOFD>, Errno> {
-        let dirfd = (dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
+    ) -> Result<Self::FD, Errno> {
         let state_arc = Arc::clone(&self.state);
 
         self.event(Event {
@@ -681,37 +647,26 @@ where
                 id
             },
             f: |inner, id| {
-                let inner = inner.openat2(dirfd.inner.as_ref(), path, oflags, mode, resolve)?;
+                let inner = inner.openat2(&dirfd.inner, path, oflags, mode, resolve)?;
 
-                Ok(Box::new(DebugIOFD {
+                Ok(DebugIOFD {
                     inner,
                     id,
                     state: state_arc,
-                }) as Box<dyn IOFD>)
+                })
             },
-            map_ok: |fd| {
-                Value::ID(
-                    "fd",
-                    (fd.as_ref() as &dyn Any)
-                        .downcast_ref::<DebugIOFD>()
-                        .expect("just created that type")
-                        .id,
-                )
-            },
+            map_ok: |fd| Value::ID("fd", fd.id),
+            phantom: PhantomData,
         })
     }
 
     fn preadv2(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         bufs: &mut [std::io::IoSliceMut<'_>],
         offset: u64,
         flags: rustix::io::ReadWriteFlags,
     ) -> Result<usize, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "preadv2",
             args: IndexMap::from([
@@ -721,22 +676,19 @@ where
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.preadv2(fd.inner.as_ref(), bufs, offset, flags),
+            f: |inner, ()| inner.preadv2(&fd.inner, bufs, offset, flags),
             map_ok: |n| Value::Size(*n as _),
+            phantom: PhantomData,
         })
     }
 
     fn pwritev2(
         &mut self,
-        fd: &dyn IOFD,
+        fd: &Self::FD,
         bufs: &[std::io::IoSlice<'_>],
         offset: u64,
         flags: rustix::io::ReadWriteFlags,
     ) -> Result<usize, Errno> {
-        let fd = (fd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "pwritev2",
             args: IndexMap::from([
@@ -746,26 +698,20 @@ where
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.pwritev2(fd.inner.as_ref(), bufs, offset, flags),
+            f: |inner, ()| inner.pwritev2(&fd.inner, bufs, offset, flags),
             map_ok: |n| Value::Size(*n as _),
+            phantom: PhantomData,
         })
     }
 
     fn renameat2(
         &mut self,
-        old_dirfd: &dyn IOFD,
+        old_dirfd: &Self::FD,
         old_path: &str,
-        new_dirfd: &dyn IOFD,
+        new_dirfd: &Self::FD,
         new_path: &str,
         flags: rustix::fs::RenameFlags,
     ) -> Result<(), Errno> {
-        let old_dirfd = (old_dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-        let new_dirfd = (new_dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "renameat2",
             args: IndexMap::from([
@@ -778,27 +724,24 @@ where
             state: |_| (),
             f: |inner, ()| {
                 inner.renameat2(
-                    old_dirfd.inner.as_ref(),
+                    &old_dirfd.inner,
                     old_path,
-                    new_dirfd.inner.as_ref(),
+                    &new_dirfd.inner,
                     new_path,
                     flags,
                 )
             },
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
     fn statat(
         &mut self,
-        dirfd: &dyn IOFD,
+        dirfd: &Self::FD,
         path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<rustix::fs::Stat, Errno> {
-        let dirfd = (dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "statat",
             args: IndexMap::from([
@@ -807,21 +750,18 @@ where
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.statat(dirfd.inner.as_ref(), path, flags),
+            f: |inner, ()| inner.statat(&dirfd.inner, path, flags),
             map_ok: |_| Value::Ellipsis,
+            phantom: PhantomData,
         })
     }
 
     fn unlinkat(
         &mut self,
-        dirfd: &dyn IOFD,
+        dirfd: &Self::FD,
         path: &str,
         flags: rustix::fs::AtFlags,
     ) -> Result<(), Errno> {
-        let dirfd = (dirfd as &dyn Any)
-            .downcast_ref::<DebugIOFD>()
-            .expect("wrong type");
-
         self.event(Event {
             fun: "unlinkat",
             args: IndexMap::from([
@@ -830,8 +770,9 @@ where
                 ("flags", Value::flags(flags)),
             ]),
             state: |_| (),
-            f: |inner, ()| inner.unlinkat(dirfd.inner.as_ref(), path, flags),
+            f: |inner, ()| inner.unlinkat(&dirfd.inner, path, flags),
             map_ok: |()| Value::Unit,
+            phantom: PhantomData,
         })
     }
 
@@ -846,22 +787,25 @@ where
             },
             f: |_, uuid| Ok(uuid),
             map_ok: |uuid| Value::String(uuid.to_string()),
+            phantom: PhantomData,
         })
         .expect("never fails")
     }
 }
 
-struct Event<FState, D, FIO, T, O>
+struct Event<FState, D, FIO, T, O, B>
 where
     FState: for<'a> FnOnce(&'a mut State) -> D,
-    FIO: for<'a> FnOnce(&'a mut dyn IOBlock, D) -> Result<T, Errno>,
+    FIO: for<'a> FnOnce(&'a mut B, D) -> Result<T, Errno>,
     O: for<'a> FnOnce(&'a T) -> Value,
+    B: IOBlock,
 {
     fun: &'static str,
     args: IndexMap<&'static str, Value>,
     state: FState,
     f: FIO,
     map_ok: O,
+    phantom: PhantomData<(T, B)>,
 }
 
 struct DebugIORawMutex {
@@ -1003,13 +947,19 @@ struct DebugIORawMutexGuard {
 impl IORawMutexGuard for DebugIORawMutexGuard {}
 
 #[derive(Debug)]
-struct DebugIOFD {
-    inner: Box<dyn IOFD>,
+pub struct DebugIOFD<FD>
+where
+    FD: IOFD,
+{
+    inner: FD,
     id: u64,
     state: Arc<Mutex<State>>,
 }
 
-impl Drop for DebugIOFD {
+impl<FD> Drop for DebugIOFD<FD>
+where
+    FD: IOFD,
+{
     fn drop(&mut self) {
         let mut guard = self.state.lock().unwrap();
 
@@ -1026,4 +976,4 @@ impl Drop for DebugIOFD {
     }
 }
 
-impl IOFD for DebugIOFD {}
+impl<FD> IOFD for DebugIOFD<FD> where FD: IOFD {}
