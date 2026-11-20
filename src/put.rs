@@ -13,7 +13,7 @@ use crate::{
         RESOLVE_FLAGS,
     },
     error::IOErrorExt,
-    io::{IOBlock, IOFD, spawn_io},
+    io::{IOBlock, IOFD},
     state::State,
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
@@ -28,7 +28,12 @@ pub(crate) struct PreparedPutOperation {
 }
 
 impl PreparedPutOperation {
-    pub(crate) async fn new(location: &Path, opts: PutOptions, state: &Arc<State>) -> Result<Self> {
+    pub(crate) fn new(
+        io: &mut dyn IOBlock,
+        location: Path,
+        opts: PutOptions,
+        state: &Arc<State>,
+    ) -> Result<Self> {
         let PutOptions {
             mode,
             // ignore tags
@@ -43,15 +48,9 @@ impl PreparedPutOperation {
             PutMode::Update(_) => OpenDirMode::Update,
         };
 
-        let location = location.clone();
-        let state2 = Arc::clone(state);
-        let (location, dir_fd, file) = spawn_io(&state.options().io_layer, move |io| {
-            let (dirs, file) = split_dirs_and_filename(&location, open_dir_mode)?;
-            let file = file.to_owned();
-            let dir_fd = state2.open_dir(io, dirs, open_dir_mode)?;
-            Ok((location, dir_fd, file))
-        })
-        .await?;
+        let (dirs, file) = split_dirs_and_filename(&location, open_dir_mode)?;
+        let file = file.to_owned();
+        let dir_fd = state.open_dir(io, dirs, open_dir_mode)?;
 
         Ok(Self {
             location,
