@@ -81,8 +81,10 @@ struct RawIOFD {
 impl IOFD for RawIOFD {}
 
 impl IOLayer for RawIOLayer {
-    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
-        Box::new(RawIOBlockPrepared)
+    type BlockPrepared = RawIOBlockPrepared;
+
+    fn prepare_block(&self) -> Self::BlockPrepared {
+        RawIOBlockPrepared { _priv: () }
     }
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
@@ -98,7 +100,10 @@ impl IOLayer for RawIOLayer {
     }
 }
 
-struct RawIOBlockPrepared;
+pub struct RawIOBlockPrepared {
+    // prevent public construction
+    _priv: (),
+}
 
 impl IOBlockPrepared for RawIOBlockPrepared {
     fn start(&mut self) -> Box<dyn IOBlock> {

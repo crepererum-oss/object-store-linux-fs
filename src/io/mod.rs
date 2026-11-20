@@ -28,7 +28,9 @@ pub use raw::RawIOLayer;
 pub type DefaultIOLayer = RawIOLayer;
 
 pub trait IOLayer: Debug + Send + Sync + 'static {
-    fn prepare_block(&self) -> Box<dyn IOBlockPrepared>;
+    type BlockPrepared: IOBlockPrepared;
+
+    fn prepare_block(&self) -> Self::BlockPrepared;
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock>;
 }
@@ -186,7 +188,9 @@ impl<T> IOLayer for Arc<T>
 where
     T: ?Sized + IOLayer,
 {
-    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
+    type BlockPrepared = T::BlockPrepared;
+
+    fn prepare_block(&self) -> Self::BlockPrepared {
         self.as_ref().prepare_block()
     }
 
@@ -199,8 +203,9 @@ where
     }
 }
 
-pub(crate) async fn spawn_io<F, R>(io_layer: &dyn IOLayer, f: F) -> Result<R, object_store::Error>
+pub(crate) async fn spawn_io<IO, F, R>(io_layer: &IO, f: F) -> Result<R, object_store::Error>
 where
+    IO: IOLayer,
     F: for<'a> FnOnce(&'a mut dyn IOBlock) -> Result<R, object_store::Error> + Send + 'static,
     R: Send + 'static,
 {
@@ -229,7 +234,10 @@ pub(crate) struct IOMutex<T> {
 }
 
 impl<T> IOMutex<T> {
-    pub(crate) fn new(io: &dyn IOLayer, data: T) -> Self {
+    pub(crate) fn new<IO>(io: &IO, data: T) -> Self
+    where
+        IO: IOLayer,
+    {
         Self {
             data: UnsafeCell::new(data),
             raw: io.create_raw_mutex(),
@@ -293,7 +301,10 @@ pub(crate) struct IORwLock<T> {
 }
 
 impl<T> IORwLock<T> {
-    pub(crate) fn new(io: &dyn IOLayer, data: T) -> Self {
+    pub(crate) fn new<IO>(io: &IO, data: T) -> Self
+    where
+        IO: IOLayer,
+    {
         Self {
             data: UnsafeCell::new(data),
             raw: io.create_raw_rwlock(),

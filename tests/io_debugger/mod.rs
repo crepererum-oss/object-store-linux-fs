@@ -51,8 +51,11 @@ struct State {
 }
 
 #[derive(Debug)]
-pub struct DebugIOLayer {
-    inner: DefaultIOLayer,
+pub struct DebugIOLayer<IO = DefaultIOLayer>
+where
+    IO: IOLayer,
+{
+    inner: IO,
     state: Arc<Mutex<State>>,
     order: Arc<Order>,
 }
@@ -92,8 +95,13 @@ impl DebugIOLayer {
     }
 }
 
-impl IOLayer for DebugIOLayer {
-    fn prepare_block(&self) -> Box<dyn IOBlockPrepared> {
+impl<IO> IOLayer for DebugIOLayer<IO>
+where
+    IO: IOLayer,
+{
+    type BlockPrepared = DebugIOBlockPrepared<IO::BlockPrepared>;
+
+    fn prepare_block(&self) -> Self::BlockPrepared {
         let mut guard = self.state.lock().unwrap();
 
         let task_id = ASYNC_TASK_ID.try_get().ok();
@@ -101,13 +109,13 @@ impl IOLayer for DebugIOLayer {
         let block_id = guard.block_counter;
         guard.block_counter += 1;
 
-        Box::new(DebugIOBlockPrepared {
+        DebugIOBlockPrepared {
             inner: Some(self.inner.prepare_block()),
             task_id,
             block_id,
             state: Arc::clone(&self.state),
             order: Arc::clone(&self.order),
-        })
+        }
     }
 
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
@@ -161,15 +169,21 @@ impl IOLayer for DebugIOLayer {
     }
 }
 
-struct DebugIOBlockPrepared {
-    inner: Option<Box<dyn IOBlockPrepared>>,
+pub struct DebugIOBlockPrepared<I>
+where
+    I: IOBlockPrepared,
+{
+    inner: Option<I>,
     task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
     order: Arc<Order>,
 }
 
-impl IOBlockPrepared for DebugIOBlockPrepared {
+impl<I> IOBlockPrepared for DebugIOBlockPrepared<I>
+where
+    I: IOBlockPrepared,
+{
     fn start(&mut self) -> Box<dyn IOBlock> {
         let Self {
             inner,
