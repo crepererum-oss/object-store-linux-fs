@@ -9,8 +9,8 @@ use std::{
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORwLock,
-    IORwLockReadGuard, IORwLockWriteGuard,
+    IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORwLock, IORwLockReadGuard,
+    IORwLockWriteGuard,
 };
 use parking_lot::ReentrantMutex;
 use rustix::io::Errno;
@@ -54,8 +54,8 @@ struct State {
 
 type SharedState = Arc<ReentrantMutex<RefCell<State>>>;
 
-#[derive(Debug)]
-pub struct DebugIOLayer<IO = DefaultIOLayer>
+#[derive(Debug, Default)]
+pub struct DebugIOLayer<IO>
 where
     IO: IOLayer,
 {
@@ -64,10 +64,13 @@ where
     order: Arc<Order>,
 }
 
-impl DebugIOLayer {
-    pub fn new() -> Self {
+impl<IO> DebugIOLayer<IO>
+where
+    IO: IOLayer,
+{
+    pub fn new(inner: IO) -> Self {
         Self {
-            inner: DefaultIOLayer::default(),
+            inner,
             state: Default::default(),
             order: Default::default(),
         }

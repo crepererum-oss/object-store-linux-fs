@@ -183,15 +183,14 @@ where
                                 }
 
                                 let to_read = buf.len().min(whats_left);
-                                let got = rustix::io::retry_on_intr(|| {
-                                    io.preadv2(
+                                let got = io
+                                    .preadv2(
                                         &file_fd,
                                         &mut [IoSliceMut::new(&mut buf[..to_read])],
                                         offset as _,
                                         READ_WRITE_FLAGS,
                                     )
-                                })
-                                .into_get_err(&location)?;
+                                    .into_get_err(&location)?;
 
                                 if got == 0 {
                                     drop(file_fd);
@@ -270,8 +269,8 @@ where
                         break;
                     }
 
-                    let got = rustix::io::retry_on_intr(|| {
-                        io.preadv2(
+                    let got = io
+                        .preadv2(
                             &file_fd,
                             &mut [IoSliceMut::new(
                                 &mut buffer[buffer_offset..(buffer_offset + to_read as usize)],
@@ -279,8 +278,7 @@ where
                             file_offset,
                             READ_WRITE_FLAGS,
                         )
-                    })
-                    .into_get_err(&location)?;
+                        .into_get_err(&location)?;
 
                     buffer_offset += got;
                     file_offset += got as u64;

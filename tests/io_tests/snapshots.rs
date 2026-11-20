@@ -5,14 +5,14 @@ use object_store::{Attribute, ObjectStore, ObjectStoreExt, PutOptions, path::Pat
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
 use crate::{
-    io_debugger::{DebugIOLayer, with_task_id},
-    io_tests::Fixture,
+    io_debugger::with_task_id,
+    io_tests::{Fixture, IOLayers},
 };
 
 #[tokio::test]
 async fn simple_create_put_drop() {
     let path = tempfile::tempdir().unwrap();
-    let debugger = Arc::new(DebugIOLayer::new());
+    let debugger = Arc::new(IOLayers::default());
     let storage = with_task_id(1, async {
         LinuxFS::new(
             path.path().to_path_buf(),
@@ -35,7 +35,7 @@ async fn simple_create_put_drop() {
     .await;
 
     insta::assert_snapshot!(
-        debugger.log(),
+        debugger.inner().log(),
         @r#"
     T1 B0 block-start() -> Ok(())
     T1 B0 open(path: ..., flags: DIRECTORY|NOFOLLOW|CLOEXEC, mode: <empty>) -> Ok(fd#0)

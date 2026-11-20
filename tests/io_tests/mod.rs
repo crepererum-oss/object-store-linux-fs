@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use object_store::ObjectStore;
-use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
+use object_store_linux_fs::{
+    LinuxFS, LinuxFSOptions,
+    io::{RawIOLayer, RetryIntrLayer},
+};
 
 use crate::io_debugger::{DebugIOLayer, order::Matcher};
 
@@ -12,10 +15,12 @@ mod race;
 mod snapshots;
 mod syscall_semantics;
 
+type IOLayers = RetryIntrLayer<DebugIOLayer<RawIOLayer>>;
+
 struct Fixture {
     tempdir: tempfile::TempDir,
-    debugger: Arc<DebugIOLayer>,
-    storage: LinuxFS<DebugIOLayer>,
+    debugger: DebuggerRef,
+    storage: LinuxFS<IOLayers>,
 }
 
 impl Fixture {
@@ -35,15 +40,22 @@ impl Fixture {
         F: for<'a> AsyncFnOnce(&'a dyn ObjectStore),
     {
         let tempdir = tempfile::tempdir().unwrap();
-        let debugger = Arc::new(DebugIOLayer::new().with_order(order.into()));
-        let storage = LinuxFS::<DebugIOLayer>::new(
+
+        let io = RawIOLayer;
+        let io = DebugIOLayer::new(io).with_order(order.into());
+        let io = RetryIntrLayer::new(io);
+        let io = Arc::new(io);
+
+        let storage = LinuxFS::<IOLayers>::new(
             tempdir.path().to_path_buf(),
-            options.with_io(Arc::clone(&debugger)),
+            options.with_io(Arc::clone(&io)),
         )
         .await
         .unwrap();
 
         f(&storage).await;
+
+        let debugger = DebuggerRef { inner: io };
         debugger.wipe_log();
 
         Self {
@@ -57,5 +69,17 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         println!("{}", self.debugger.log());
+    }
+}
+
+struct DebuggerRef {
+    inner: Arc<RetryIntrLayer<DebugIOLayer<RawIOLayer>>>,
+}
+
+impl Deref for DebuggerRef {
+    type Target = DebugIOLayer<RawIOLayer>;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.inner()
     }
 }

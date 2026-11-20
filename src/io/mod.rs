@@ -19,10 +19,12 @@ use uuid::Uuid;
 use crate::constants::STORE_NAME;
 
 mod raw;
+mod retry_intr;
 
 pub use raw::RawIOLayer;
+pub use retry_intr::RetryIntrLayer;
 
-pub type DefaultIOLayer = RawIOLayer;
+pub type DefaultIOLayer = RetryIntrLayer<RawIOLayer>;
 
 pub trait IOLayer: Debug + Send + Sync + 'static {
     type Block: IOBlock<FD = Self::FD>;
