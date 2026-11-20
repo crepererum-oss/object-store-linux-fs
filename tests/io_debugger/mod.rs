@@ -169,22 +169,24 @@ where
     }
 }
 
-pub struct DebugIOBlockPrepared<I>
+pub struct DebugIOBlockPrepared<P>
 where
-    I: IOBlockPrepared,
+    P: IOBlockPrepared,
 {
-    inner: Option<I>,
+    inner: Option<P>,
     task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
     order: Arc<Order>,
 }
 
-impl<I> IOBlockPrepared for DebugIOBlockPrepared<I>
+impl<P> IOBlockPrepared for DebugIOBlockPrepared<P>
 where
-    I: IOBlockPrepared,
+    P: IOBlockPrepared,
 {
-    fn start(&mut self) -> Box<dyn IOBlock> {
+    type Block = DebugIOBlock<<P as IOBlockPrepared>::Block>;
+
+    fn start(&mut self) -> Self::Block {
         let Self {
             inner,
             task_id,
@@ -208,25 +210,31 @@ where
 
         let mut inner = inner.take().expect("not started");
         let inner = inner.start();
-        Box::new(DebugIOBlock {
+        DebugIOBlock {
             inner,
             task_id: *task_id,
             block_id: *block_id,
             state: Arc::clone(state),
             order: Arc::clone(order),
-        })
+        }
     }
 }
 
-struct DebugIOBlock {
-    inner: Box<dyn IOBlock>,
+pub struct DebugIOBlock<B>
+where
+    B: IOBlock,
+{
+    inner: B,
     task_id: Option<u64>,
     block_id: u64,
     state: Arc<Mutex<State>>,
     order: Arc<Order>,
 }
 
-impl DebugIOBlock {
+impl<B> DebugIOBlock<B>
+where
+    B: IOBlock,
+{
     fn event<FState, D, FIO, T, O>(&mut self, evt: Event<FState, D, FIO, T, O>) -> Result<T, Errno>
     where
         FState: for<'a> FnOnce(&'a mut State) -> D,
@@ -254,7 +262,7 @@ impl DebugIOBlock {
         drop(state_guard);
 
         let res = match arrange_guard.manipulation() {
-            None => f(self.inner.as_mut(), data),
+            None => f(&mut self.inner, data),
             Some(Manipulation::FailBefore(e)) => Err(*e),
         };
 
@@ -275,7 +283,10 @@ impl DebugIOBlock {
     }
 }
 
-impl Drop for DebugIOBlock {
+impl<B> Drop for DebugIOBlock<B>
+where
+    B: IOBlock,
+{
     fn drop(&mut self) {
         let mut guard = self.state.lock().unwrap();
 
@@ -292,7 +303,10 @@ impl Drop for DebugIOBlock {
     }
 }
 
-impl IOBlock for DebugIOBlock {
+impl<B> IOBlock for DebugIOBlock<B>
+where
+    B: IOBlock,
+{
     fn fgetxattr<'a>(
         &mut self,
         fd: &dyn IOFD,

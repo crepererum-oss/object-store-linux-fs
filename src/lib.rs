@@ -18,7 +18,7 @@ use crate::{
         STORE_NAME,
     },
     error::IOErrorExt,
-    io::{DefaultIOLayer, IOLayer, spawn_io},
+    io::{DefaultIOLayer, IOBlock, IOLayer, spawn_io},
     put::PreparedPutOperation,
     put_multipart::LinuxFSUpload,
     state::State,

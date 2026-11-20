@@ -14,7 +14,7 @@ use crate::{
         STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
-    io::{IOFD, IOLayer, spawn_io},
+    io::{IOBlock, IOFD, IOLayer, spawn_io},
     state::State,
     utils::{OpenDirMode, open_dir_fd, stat_to_meta},
 };

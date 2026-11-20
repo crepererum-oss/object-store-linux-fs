@@ -106,12 +106,17 @@ pub struct RawIOBlockPrepared {
 }
 
 impl IOBlockPrepared for RawIOBlockPrepared {
-    fn start(&mut self) -> Box<dyn IOBlock> {
-        Box::new(RawIOBlock)
+    type Block = RawIOBlock;
+
+    fn start(&mut self) -> Self::Block {
+        RawIOBlock { _priv: () }
     }
 }
 
-struct RawIOBlock;
+pub struct RawIOBlock {
+    // prevent public construction
+    _priv: (),
+}
 
 impl IOBlock for RawIOBlock {
     fn fgetxattr<'a>(

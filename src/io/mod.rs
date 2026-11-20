@@ -36,7 +36,9 @@ pub trait IOLayer: Debug + Send + Sync + 'static {
 }
 
 pub trait IOBlockPrepared: Send {
-    fn start(&mut self) -> Box<dyn IOBlock>;
+    type Block: IOBlock;
+
+    fn start(&mut self) -> Self::Block;
 }
 
 pub trait IOBlock {
@@ -206,14 +208,18 @@ where
 pub(crate) async fn spawn_io<IO, F, R>(io_layer: &IO, f: F) -> Result<R, object_store::Error>
 where
     IO: IOLayer,
-    F: for<'a> FnOnce(&'a mut dyn IOBlock) -> Result<R, object_store::Error> + Send + 'static,
+    F: for<'a> FnOnce(
+            &'a mut <<IO as IOLayer>::BlockPrepared as IOBlockPrepared>::Block,
+        ) -> Result<R, object_store::Error>
+        + Send
+        + 'static,
     R: Send + 'static,
 {
     let mut prepared = io_layer.prepare_block();
 
     tokio::task::spawn_blocking(move || {
         let mut block = prepared.start();
-        f(block.as_mut())
+        f(&mut block)
     })
     .await
     .map_err(|e| {
