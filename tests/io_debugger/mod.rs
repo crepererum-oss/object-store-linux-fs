@@ -8,8 +8,8 @@ use std::{
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard, IORawRwLock,
-    RustixIOLayer,
+    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard,
+    IORawRwLock,
 };
 use rustix::io::Errno;
 use uuid::Uuid;
@@ -52,7 +52,7 @@ struct State {
 
 #[derive(Debug)]
 pub struct DebugIOLayer {
-    inner: RustixIOLayer,
+    inner: DefaultIOLayer,
     state: Arc<Mutex<State>>,
     order: Arc<Order>,
 }
@@ -60,7 +60,7 @@ pub struct DebugIOLayer {
 impl DebugIOLayer {
     pub fn new() -> Self {
         Self {
-            inner: RustixIOLayer,
+            inner: DefaultIOLayer::default(),
             state: Default::default(),
             order: Default::default(),
         }

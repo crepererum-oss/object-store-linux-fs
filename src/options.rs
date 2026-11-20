@@ -1,6 +1,6 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use crate::io::{IOLayer, RustixIOLayer};
+use crate::io::{DefaultIOLayer, IOLayer};
 
 #[derive(Debug)]
 pub struct LinuxFSOptions {
@@ -14,7 +14,7 @@ pub struct LinuxFSOptions {
 impl Default for LinuxFSOptions {
     fn default() -> Self {
         Self {
-            io_layer: Arc::new(RustixIOLayer),
+            io_layer: Arc::new(DefaultIOLayer::default()),
             read_buffer_size: NonZeroUsize::new(4096).unwrap(),
         }
     }
