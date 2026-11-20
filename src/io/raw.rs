@@ -2,7 +2,6 @@ use std::{
     any::Any,
     io::{IoSlice, IoSliceMut},
     mem::MaybeUninit,
-    ops::{Deref, DerefMut},
     os::fd::OwnedFd,
 };
 
@@ -69,7 +68,7 @@ impl IOLayer for RawIOLayer {
     type BlockPrepared = RawIOBlockPrepared;
     type FD = RawIOFD;
     type Mutex<T>
-        = ParkingLotMutex<T>
+        = parking_lot::Mutex<T>
     where
         T: Send + std::fmt::Debug;
 
@@ -81,9 +80,7 @@ impl IOLayer for RawIOLayer {
     where
         T: Send + std::fmt::Debug,
     {
-        ParkingLotMutex {
-            inner: parking_lot::Mutex::new(data),
-        }
+        parking_lot::Mutex::new(data)
     }
 
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
@@ -325,48 +322,20 @@ impl IOBlock for RawIOBlock {
     }
 }
 
-#[derive(Debug)]
-pub struct ParkingLotMutex<T>
-where
-    T: Send,
-{
-    inner: parking_lot::Mutex<T>,
-}
-
-impl<T> IOMutex<T> for ParkingLotMutex<T>
+impl<T> IOMutex<T> for parking_lot::Mutex<T>
 where
     T: Send + std::fmt::Debug,
 {
     type Block = RawIOBlock;
 
     type Guard<'a>
-        = ParkingLotMutexGuard<'a, T>
+        = parking_lot::MutexGuard<'a, T>
     where
         Self: 'a;
 
     fn lock<'a>(&'a self, _io: &mut Self::Block) -> Self::Guard<'a> {
-        ParkingLotMutexGuard {
-            inner: self.inner.lock(),
-        }
+        self.lock()
     }
 }
 
-pub struct ParkingLotMutexGuard<'a, T> {
-    inner: parking_lot::MutexGuard<'a, T>,
-}
-
-impl<'a, T> Deref for ParkingLotMutexGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.deref()
-    }
-}
-
-impl<'a, T> DerefMut for ParkingLotMutexGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.deref_mut()
-    }
-}
-
-impl<'a, T> IOMutexGuard<'a, T> for ParkingLotMutexGuard<'a, T> {}
+impl<'a, T> IOMutexGuard<'a, T> for parking_lot::MutexGuard<'a, T> {}
