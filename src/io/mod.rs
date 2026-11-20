@@ -31,9 +31,14 @@ pub trait IOLayer: Debug + Send + Sync + 'static {
     type Block: IOBlock<FD = Self::FD>;
     type BlockPrepared: IOBlockPrepared<Block = Self::Block>;
     type FD: IOFD;
+    type Mutex<T>: IOMutex<T, Block = Self::Block>
+    where
+        T: Send + Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared;
-    fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
+    fn create_mutex<T>(&self, data: T) -> Self::Mutex<T>
+    where
+        T: Send + Debug;
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock>;
 }
 
@@ -91,9 +96,6 @@ pub trait IOBlock {
         fd: &Self::FD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno>;
-
-    /// Lock the given lock.
-    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard>;
 
     /// Write-lock the given rw lock.
     fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard>;
@@ -170,12 +172,6 @@ pub trait IOBlock {
     fn uuid(&mut self) -> Uuid;
 }
 
-pub trait IORawMutex: Any + Send + Sync {
-    /// # Safety
-    /// See [`lock_api::RawMutex::unlock`].
-    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>);
-}
-
 pub trait IORawMutexGuard: Any {}
 
 pub trait IORawRwLock: Any + Send + Sync {
@@ -197,13 +193,20 @@ where
     type Block = T::Block;
     type BlockPrepared = T::BlockPrepared;
     type FD = T::FD;
+    type Mutex<T2>
+        = T::Mutex<T2>
+    where
+        T2: Send + Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         self.as_ref().prepare_block()
     }
 
-    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
-        self.as_ref().create_raw_mutex()
+    fn create_mutex<T2>(&self, data: T2) -> Self::Mutex<T2>
+    where
+        T2: Send + Debug,
+    {
+        self.as_ref().create_mutex(data)
     }
 
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
@@ -236,75 +239,19 @@ where
     })?
 }
 
-pub(crate) struct IOMutex<T> {
-    data: UnsafeCell<T>,
-    raw: Box<dyn IORawMutex>,
-}
-
-impl<T> IOMutex<T> {
-    pub(crate) fn new<IO>(io: &IO, data: T) -> Self
+pub trait IOMutex<T>: Send + Sync + Debug
+where
+    T: Send + Debug,
+{
+    type Block: IOBlock;
+    type Guard<'a>: IOMutexGuard<'a, T>
     where
-        IO: IOLayer,
-    {
-        Self {
-            data: UnsafeCell::new(data),
-            raw: io.create_raw_mutex(),
-        }
-    }
+        Self: 'a;
 
-    pub(crate) fn lock<B>(&self, io: &mut B) -> IOMutexGuard<'_, T>
-    where
-        B: IOBlock,
-    {
-        let guard = io.lock(self.raw.as_ref());
-
-        IOMutexGuard {
-            mutex: self,
-            marker: PhantomData,
-            guard: ManuallyDrop::new(guard),
-        }
-    }
+    fn lock<'a>(&'a self, io: &mut Self::Block) -> Self::Guard<'a>;
 }
 
-impl<T> std::fmt::Debug for IOMutex<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IOMutex").finish_non_exhaustive()
-    }
-}
-
-unsafe impl<T: Send> Sync for IOMutex<T> {}
-
-pub(crate) struct IOMutexGuard<'a, T> {
-    mutex: &'a IOMutex<T>,
-    marker: PhantomData<&'a mut T>,
-    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
-}
-
-impl<'a, T: 'a> Drop for IOMutexGuard<'a, T> {
-    #[inline]
-    fn drop(&mut self) {
-        // Safety: A MutexGuard always holds the lock.
-        unsafe {
-            self.mutex.raw.unlock(ManuallyDrop::take(&mut self.guard));
-        }
-    }
-}
-
-impl<'a, T: 'a> Deref for IOMutexGuard<'a, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        unsafe { self.mutex.data.get().as_ref_unchecked() }
-    }
-}
-
-impl<'a, T: 'a> DerefMut for IOMutexGuard<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.mutex.data.get().as_mut_unchecked() }
-    }
-}
+pub trait IOMutexGuard<'a, T>: Deref<Target = T> + DerefMut<Target = T> {}
 
 pub(crate) struct IORwLock<T> {
     data: UnsafeCell<T>,

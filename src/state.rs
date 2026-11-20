@@ -21,7 +21,7 @@ where
     IO: IOLayer,
 {
     root: PathBuf,
-    dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<IO::FD>>>,
+    dir_fd_cache: IO::Mutex<HashMap<PathBuf, Arc<IO::FD>>>,
     options: LinuxFSOptions<IO>,
 }
 
@@ -41,10 +41,9 @@ where
 
         Ok(Self {
             root: root.clone(),
-            dir_fd_cache: IOMutex::new(
-                &options.io_layer,
-                HashMap::from([(root, Arc::from(root_fd))]),
-            ),
+            dir_fd_cache: options
+                .io_layer
+                .create_mutex(HashMap::from([(root, Arc::from(root_fd))])),
             options,
         })
     }

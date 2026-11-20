@@ -1,17 +1,19 @@
 use std::{
     any::Any,
-    cell::Cell,
+    cell::{Cell, RefCell},
     fmt::Write,
     marker::PhantomData,
-    mem::MaybeUninit,
-    sync::{Arc, Mutex},
+    mem::{ManuallyDrop, MaybeUninit},
+    ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard,
-    IORawRwLock,
+    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard,
+    IORawMutexGuard, IORawRwLock,
 };
+use parking_lot::ReentrantMutex;
 use rustix::io::Errno;
 use uuid::Uuid;
 
@@ -51,13 +53,15 @@ struct State {
     uuid_counter: u128,
 }
 
+type SharedState = Arc<ReentrantMutex<RefCell<State>>>;
+
 #[derive(Debug)]
 pub struct DebugIOLayer<IO = DefaultIOLayer>
 where
     IO: IOLayer,
 {
     inner: IO,
-    state: Arc<Mutex<State>>,
+    state: SharedState,
     order: Arc<Order>,
 }
 
@@ -79,7 +83,8 @@ impl DebugIOLayer {
 
     pub fn log(&self) -> String {
         let mut out = String::new();
-        let guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let guard = guard.borrow();
         for entry in &guard.log {
             writeln!(&mut out, "{entry}").unwrap();
         }
@@ -87,11 +92,14 @@ impl DebugIOLayer {
     }
 
     pub fn log_entries(&self) -> Vec<LogEntry> {
-        self.state.lock().unwrap().log.clone()
+        let guard = self.state.lock();
+        let guard = guard.borrow();
+        guard.log.clone()
     }
 
     pub fn wipe_log(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
         guard.log.clear();
     }
 }
@@ -103,9 +111,14 @@ where
     type Block = DebugIOBlock<IO::Block>;
     type BlockPrepared = DebugIOBlockPrepared<IO::BlockPrepared>;
     type FD = DebugIOFD<IO::FD>;
+    type Mutex<T>
+        = DebugIOMutex<T, IO::Mutex<T>>
+    where
+        T: Send + std::fmt::Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         let task_id = ASYNC_TASK_ID.try_get().ok();
 
@@ -121,9 +134,13 @@ where
         }
     }
 
-    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
+    fn create_mutex<T>(&self, data: T) -> Self::Mutex<T>
+    where
+        T: Send + std::fmt::Debug,
+    {
         let state = Arc::clone(&self.state);
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         let id = guard.mutex_counter;
         guard.mutex_counter += 1;
@@ -139,16 +156,18 @@ where
             res: Ok(Value::ID("mutex", id)),
         });
 
-        Box::new(DebugIORawMutex {
+        DebugIOMutex {
             id,
-            inner: self.inner.create_raw_mutex(),
+            inner: ManuallyDrop::new(self.inner.create_mutex(data)),
             state,
-        })
+            _phantom: PhantomData,
+        }
     }
 
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
         let state = Arc::clone(&self.state);
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         let id = guard.rwlock_counter;
         guard.rwlock_counter += 1;
@@ -179,7 +198,7 @@ where
     inner: Option<P>,
     task_id: Option<u64>,
     block_id: u64,
-    state: Arc<Mutex<State>>,
+    state: SharedState,
     order: Arc<Order>,
 }
 
@@ -198,7 +217,8 @@ where
             order,
         } = self;
 
-        let mut guard = state.lock().unwrap();
+        let guard = state.lock();
+        let mut guard = guard.borrow_mut();
 
         SYNC_TASK_ID.set(*task_id);
         SYNC_BLOCK_ID.set(Some(*block_id));
@@ -213,6 +233,7 @@ where
 
         let mut inner = inner.take().expect("not started");
         let inner = inner.start();
+
         DebugIOBlock {
             inner,
             task_id: *task_id,
@@ -230,7 +251,7 @@ where
     inner: B,
     task_id: Option<u64>,
     block_id: u64,
-    state: Arc<Mutex<State>>,
+    state: SharedState,
     order: Arc<Order>,
 }
 
@@ -264,17 +285,20 @@ where
             args: &args,
         });
 
-        let mut state_guard = self.state.lock().unwrap();
-        let data = state(&mut state_guard);
-        drop(state_guard);
+        let data = {
+            let state_guard = self.state.lock();
+            let mut state_guard = state_guard.borrow_mut();
+            state(&mut state_guard)
+        };
 
         let res = match arrange_guard.manipulation() {
             None => f(&mut self.inner, data),
             Some(Manipulation::FailBefore(e)) => Err(*e),
         };
 
-        let mut state_guard = self.state.lock().unwrap();
-        state_guard.log.push(LogEntry {
+        let state_guard = self.state.lock();
+        let mut state_guard_mut = state_guard.borrow_mut();
+        state_guard_mut.log.push(LogEntry {
             task_id: self.task_id,
             block_id: Some(self.block_id),
             fun,
@@ -283,6 +307,7 @@ where
         });
 
         // drop guards in order
+        drop(state_guard_mut);
         drop(state_guard);
         drop(arrange_guard);
 
@@ -295,7 +320,8 @@ where
     B: IOBlock,
 {
     fn drop(&mut self) {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         SYNC_TASK_ID.set(None);
         SYNC_BLOCK_ID.set(None);
@@ -447,35 +473,6 @@ where
             map_ok: |_| Value::Ellipsis,
             phantom: PhantomData,
         })
-    }
-
-    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard> {
-        let lock = (raw_lock as &dyn Any)
-            .downcast_ref::<DebugIORawMutex>()
-            .expect("wrong type");
-
-        self.event(Event {
-            fun: "lock",
-            args: IndexMap::from([("mutex", Value::ID("mutex", lock.id))]),
-            state: |state| {
-                let id = state.guard_counter;
-                state.guard_counter += 1;
-                id
-            },
-            f: |inner, id| {
-                let inner = inner.lock(lock.inner.as_ref());
-                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
-            },
-            map_ok: |guard| {
-                let id = (guard.as_ref() as &dyn Any)
-                    .downcast_ref::<DebugIORawMutexGuard>()
-                    .expect("just created that type")
-                    .id;
-                Value::ID("guard", id)
-            },
-            phantom: PhantomData,
-        })
-        .expect("never fails")
     }
 
     fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
@@ -808,20 +805,40 @@ where
     phantom: PhantomData<(T, B)>,
 }
 
-struct DebugIORawMutex {
+#[derive(Debug)]
+pub struct DebugIOMutex<T, M>
+where
+    M: IOMutex<T>,
+    T: Send + std::fmt::Debug,
+{
     id: u64,
-    inner: Box<dyn IORawMutex>,
-    state: Arc<Mutex<State>>,
+    inner: ManuallyDrop<M>,
+    state: SharedState,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl Drop for DebugIORawMutex {
+impl<T, M> Drop for DebugIOMutex<T, M>
+where
+    M: IOMutex<T>,
+    T: Send + std::fmt::Debug,
+{
     fn drop(&mut self) {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+
+        // drop inner
+        //
+        // SAFETY: we run in destructor
+        unsafe {
+            ManuallyDrop::drop(&mut self.inner);
+        }
+
+        // get mut ref AFTER inner drop
+        let mut guard_mut = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
         let block_id = SYNC_BLOCK_ID.get();
 
-        guard.log.push(LogEntry {
+        guard_mut.log.push(LogEntry {
             task_id,
             block_id,
             fun: "destroy_mutex",
@@ -831,44 +848,122 @@ impl Drop for DebugIORawMutex {
     }
 }
 
-impl IORawMutex for DebugIORawMutex {
-    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>) {
-        let dbg_guard = (guard as Box<dyn Any>)
-            .downcast::<DebugIORawMutexGuard>()
-            .expect("wrong type");
+impl<T, M> IOMutex<T> for DebugIOMutex<T, M>
+where
+    M: IOMutex<T>,
+    T: Send + std::fmt::Debug,
+{
+    type Block = DebugIOBlock<M::Block>;
 
-        let mut guard2 = self.state.lock().unwrap();
+    type Guard<'a>
+        = DebugIOMutexGuard<'a, T, M::Guard<'a>>
+    where
+        Self: 'a;
 
-        // SAFETY: caller
+    fn lock<'a>(&'a self, io: &mut Self::Block) -> Self::Guard<'a> {
+        let state = Arc::clone(&io.state);
+
+        io.event(Event {
+            fun: "lock",
+            args: IndexMap::from([("mutex", Value::ID("mutex", self.id))]),
+            state: |state| {
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                id
+            },
+            f: |inner, guard_id| {
+                let inner = self.inner.lock(inner);
+                Ok(DebugIOMutexGuard {
+                    guard_id,
+                    mutex_id: self.id,
+                    inner: ManuallyDrop::new(inner),
+                    state,
+                    phantom: PhantomData,
+                })
+            },
+            map_ok: |guard| Value::ID("guard", guard.guard_id),
+            phantom: PhantomData,
+        })
+        .expect("never fails")
+    }
+}
+
+pub struct DebugIOMutexGuard<'a, T, G>
+where
+    G: IOMutexGuard<'a, T>,
+{
+    mutex_id: u64,
+    guard_id: u64,
+    inner: ManuallyDrop<G>,
+    state: SharedState,
+    phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T, G> Drop for DebugIOMutexGuard<'a, T, G>
+where
+    G: IOMutexGuard<'a, T>,
+{
+    fn drop(&mut self) {
+        let guard = self.state.lock();
+
+        // drop inner
+        //
+        // SAFETY: we run in destructor
         unsafe {
-            self.inner.unlock(dbg_guard.inner);
+            ManuallyDrop::drop(&mut self.inner);
         }
+
+        // get mut ref AFTER inner drop
+        let mut guard_mut = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get();
         let block_id = SYNC_BLOCK_ID.get();
 
-        guard2.log.push(LogEntry {
+        guard_mut.log.push(LogEntry {
             task_id,
             block_id,
             fun: "unlock",
             args: IndexMap::from([
-                ("mutex", Value::ID("mutex", self.id)),
-                ("guard", Value::ID("guard", dbg_guard.id)),
+                ("mutex", Value::ID("mutex", self.mutex_id)),
+                ("guard", Value::ID("guard", self.guard_id)),
             ]),
             res: Ok(Value::Unit),
         });
     }
 }
 
+impl<'a, T, G> Deref for DebugIOMutexGuard<'a, T, G>
+where
+    G: IOMutexGuard<'a, T>,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
+impl<'a, T, G> DerefMut for DebugIOMutexGuard<'a, T, G>
+where
+    G: IOMutexGuard<'a, T>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.deref_mut()
+    }
+}
+
+impl<'a, T, G> IOMutexGuard<'a, T> for DebugIOMutexGuard<'a, T, G> where G: IOMutexGuard<'a, T> {}
+
 struct DebugIORawRwLock {
     id: u64,
     inner: Box<dyn IORawRwLock>,
-    state: Arc<Mutex<State>>,
+    state: SharedState,
 }
 
 impl Drop for DebugIORawRwLock {
     fn drop(&mut self) {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
         let block_id = SYNC_BLOCK_ID.get();
@@ -889,7 +984,8 @@ impl IORawRwLock for DebugIORawRwLock {
             .downcast::<DebugIORawMutexGuard>()
             .expect("wrong type");
 
-        let mut guard2 = self.state.lock().unwrap();
+        let guard2 = self.state.lock();
+        let mut guard2 = guard2.borrow_mut();
 
         // SAFETY: caller
         unsafe {
@@ -916,7 +1012,8 @@ impl IORawRwLock for DebugIORawRwLock {
             .downcast::<DebugIORawMutexGuard>()
             .expect("wrong type");
 
-        let mut guard2 = self.state.lock().unwrap();
+        let guard2 = self.state.lock();
+        let mut guard2 = guard2.borrow_mut();
 
         // SAFETY: caller
         unsafe {
@@ -953,7 +1050,7 @@ where
 {
     inner: FD,
     id: u64,
-    state: Arc<Mutex<State>>,
+    state: SharedState,
 }
 
 impl<FD> Drop for DebugIOFD<FD>
@@ -961,7 +1058,8 @@ where
     FD: IOFD,
 {
     fn drop(&mut self) {
-        let mut guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
+        let mut guard = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
         let block_id = SYNC_BLOCK_ID.get();

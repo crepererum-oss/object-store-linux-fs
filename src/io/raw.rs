@@ -2,10 +2,11 @@ use std::{
     any::Any,
     io::{IoSlice, IoSliceMut},
     mem::MaybeUninit,
+    ops::{Deref, DerefMut},
     os::fd::OwnedFd,
 };
 
-use lock_api::{GuardNoSend, RawMutex, RawRwLock};
+use lock_api::{GuardNoSend, RawRwLock};
 use rustix::{
     fs::{
         AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat,
@@ -16,28 +17,11 @@ use rustix::{
 use uuid::Uuid;
 
 use crate::io::{
-    IOBlock, IOBlockPrepared, IOFD, IOLayer, IORawMutex, IORawMutexGuard, IORawRwLock,
+    IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORawMutexGuard, IORawRwLock,
 };
 
 #[derive(Debug, Default)]
 pub struct RawIOLayer;
-
-struct ParkingLotIORawMutex {
-    lock: parking_lot::RawMutex,
-}
-
-impl IORawMutex for ParkingLotIORawMutex {
-    unsafe fn unlock(&self, guard: Box<dyn IORawMutexGuard>) {
-        let guard = *(guard as Box<dyn Any>)
-            .downcast::<ParkingLotIORawLockGuard>()
-            .expect("wrong type");
-
-        // SAFETY: caller
-        unsafe {
-            self.lock.unlock(guard.guard);
-        }
-    }
-}
 
 struct ParkingLotIORawRwLock {
     lock: parking_lot::RawRwLock,
@@ -84,15 +68,22 @@ impl IOLayer for RawIOLayer {
     type Block = RawIOBlock;
     type BlockPrepared = RawIOBlockPrepared;
     type FD = RawIOFD;
+    type Mutex<T>
+        = ParkingLotMutex<T>
+    where
+        T: Send + std::fmt::Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         RawIOBlockPrepared { _priv: () }
     }
 
-    fn create_raw_mutex(&self) -> Box<dyn IORawMutex> {
-        Box::new(ParkingLotIORawMutex {
-            lock: parking_lot::RawMutex::INIT,
-        })
+    fn create_mutex<T>(&self, data: T) -> Self::Mutex<T>
+    where
+        T: Send + std::fmt::Debug,
+    {
+        ParkingLotMutex {
+            inner: parking_lot::Mutex::new(data),
+        }
     }
 
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
@@ -223,15 +214,6 @@ impl IOBlock for RawIOBlock {
         Ok(entries)
     }
 
-    fn lock(&mut self, raw_lock: &dyn IORawMutex) -> Box<dyn IORawMutexGuard> {
-        let guard = (raw_lock as &dyn Any)
-            .downcast_ref::<ParkingLotIORawMutex>()
-            .expect("wrong type")
-            .lock
-            .lock();
-        Box::new(ParkingLotIORawLockGuard { guard })
-    }
-
     fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
         let guard = (raw_lock as &dyn Any)
             .downcast_ref::<ParkingLotIORawRwLock>()
@@ -342,3 +324,49 @@ impl IOBlock for RawIOBlock {
         Uuid::new_v4()
     }
 }
+
+#[derive(Debug)]
+pub struct ParkingLotMutex<T>
+where
+    T: Send,
+{
+    inner: parking_lot::Mutex<T>,
+}
+
+impl<T> IOMutex<T> for ParkingLotMutex<T>
+where
+    T: Send + std::fmt::Debug,
+{
+    type Block = RawIOBlock;
+
+    type Guard<'a>
+        = ParkingLotMutexGuard<'a, T>
+    where
+        Self: 'a;
+
+    fn lock<'a>(&'a self, _io: &mut Self::Block) -> Self::Guard<'a> {
+        ParkingLotMutexGuard {
+            inner: self.inner.lock(),
+        }
+    }
+}
+
+pub struct ParkingLotMutexGuard<'a, T> {
+    inner: parking_lot::MutexGuard<'a, T>,
+}
+
+impl<'a, T> Deref for ParkingLotMutexGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
+impl<'a, T> DerefMut for ParkingLotMutexGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.deref_mut()
+    }
+}
+
+impl<'a, T> IOMutexGuard<'a, T> for ParkingLotMutexGuard<'a, T> {}
