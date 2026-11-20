@@ -13,7 +13,7 @@ use crate::{
         RESOLVE_FLAGS,
     },
     error::IOErrorExt,
-    io::{IOBlock, IOFD},
+    io::{IOBlock, IOFD, IOLayer},
     state::State,
     utils::{OpenDirMode, flock_dir, link_at_replace, split_dirs_and_filename, stat_to_meta},
 };
@@ -28,12 +28,15 @@ pub(crate) struct PreparedPutOperation {
 }
 
 impl PreparedPutOperation {
-    pub(crate) fn new(
+    pub(crate) fn new<IO>(
         io: &mut dyn IOBlock,
         location: Path,
         opts: PutOptions,
-        state: &Arc<State>,
-    ) -> Result<Self> {
+        state: &Arc<State<IO>>,
+    ) -> Result<Self>
+    where
+        IO: IOLayer,
+    {
         let PutOptions {
             mode,
             // ignore tags

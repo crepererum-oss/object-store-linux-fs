@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use object_store::ObjectStore;
 use object_store_linux_fs::{LinuxFS, LinuxFSOptions};
 
 use crate::io_debugger::{DebugIOLayer, order::Matcher};
@@ -14,13 +15,13 @@ mod syscall_semantics;
 struct Fixture {
     tempdir: tempfile::TempDir,
     debugger: Arc<DebugIOLayer>,
-    storage: LinuxFS,
+    storage: LinuxFS<DebugIOLayer>,
 }
 
 impl Fixture {
     async fn new<const N: usize, F>(order: [Matcher; N], f: F) -> Self
     where
-        F: for<'a> AsyncFnOnce(&'a LinuxFS),
+        F: for<'a> AsyncFnOnce(&'a dyn ObjectStore),
     {
         Self::new_with_options(LinuxFSOptions::default(), order, f).await
     }
@@ -31,16 +32,13 @@ impl Fixture {
         f: F,
     ) -> Self
     where
-        F: for<'a> AsyncFnOnce(&'a LinuxFS),
+        F: for<'a> AsyncFnOnce(&'a dyn ObjectStore),
     {
         let tempdir = tempfile::tempdir().unwrap();
         let debugger = Arc::new(DebugIOLayer::new().with_order(order.into()));
-        let storage = LinuxFS::new(
+        let storage = LinuxFS::<DebugIOLayer>::new(
             tempdir.path().to_path_buf(),
-            LinuxFSOptions {
-                io_layer: Arc::clone(&debugger) as _,
-                ..options
-            },
+            options.with_io(Arc::clone(&debugger)),
         )
         .await
         .unwrap();

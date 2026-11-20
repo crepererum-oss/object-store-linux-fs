@@ -16,10 +16,7 @@ async fn simple_create_put_drop() {
     let storage = with_task_id(1, async {
         LinuxFS::new(
             path.path().to_path_buf(),
-            LinuxFSOptions {
-                io_layer: Arc::clone(&debugger) as _,
-                ..Default::default()
-            },
+            LinuxFSOptions::default().with_io(Arc::clone(&debugger)),
         )
         .await
         .unwrap()

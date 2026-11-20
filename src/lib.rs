@@ -18,7 +18,7 @@ use crate::{
         STORE_NAME,
     },
     error::IOErrorExt,
-    io::spawn_io,
+    io::{DefaultIOLayer, IOLayer, spawn_io},
     put::PreparedPutOperation,
     put_multipart::LinuxFSUpload,
     state::State,
@@ -42,26 +42,38 @@ mod state;
 mod utils;
 
 #[derive(Debug)]
-pub struct LinuxFS {
-    state: Arc<State>,
+pub struct LinuxFS<IO = DefaultIOLayer>
+where
+    IO: IOLayer,
+{
+    state: Arc<State<IO>>,
 }
 
-impl LinuxFS {
-    pub async fn new(root: PathBuf, options: LinuxFSOptions) -> Result<Self> {
+impl<IO> LinuxFS<IO>
+where
+    IO: IOLayer,
+{
+    pub async fn new(root: PathBuf, options: LinuxFSOptions<IO>) -> Result<Self> {
         Ok(Self {
             state: Arc::new(State::new(root, options).await?),
         })
     }
 }
 
-impl std::fmt::Display for LinuxFS {
+impl<IO> std::fmt::Display for LinuxFS<IO>
+where
+    IO: IOLayer,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{STORE_NAME}(\"{}\")", self.state.root().display())
     }
 }
 
 #[async_trait]
-impl ObjectStore for LinuxFS {
+impl<IO> ObjectStore for LinuxFS<IO>
+where
+    IO: IOLayer,
+{
     async fn put_opts(
         &self,
         location: &Path,
@@ -101,13 +113,7 @@ impl ObjectStore for LinuxFS {
             attributes,
             extensions,
         };
-        let upload = LinuxFSUpload::new(
-            Arc::clone(&self.state.options().io_layer),
-            Arc::clone(&self.state),
-            location.clone(),
-            opts,
-        )
-        .await?;
+        let upload = LinuxFSUpload::new(Arc::clone(&self.state), location.clone(), opts).await?;
         Ok(Box::new(upload))
     }
 

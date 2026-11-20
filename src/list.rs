@@ -14,16 +14,19 @@ use crate::{
         STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
-    io::{IOFD, spawn_io},
+    io::{IOFD, IOLayer, spawn_io},
     state::State,
     utils::{OpenDirMode, open_dir_fd, stat_to_meta},
 };
 
-pub(crate) fn list(
-    state: Arc<State>,
+pub(crate) fn list<IO>(
+    state: Arc<State<IO>>,
     prefix: Option<Path>,
     offset: Option<Path>,
-) -> BoxStream<'static, Result<ObjectMeta>> {
+) -> BoxStream<'static, Result<ObjectMeta>>
+where
+    IO: IOLayer,
+{
     Box::pin(
         futures_util::stream::once(async move {
             match NextTask::start(state, prefix).await {
@@ -64,10 +67,13 @@ pub(crate) fn list(
     )
 }
 
-pub(crate) async fn list_with_delimiter(
-    state: Arc<State>,
+pub(crate) async fn list_with_delimiter<IO>(
+    state: Arc<State<IO>>,
     prefix: Option<Path>,
-) -> Result<ListResult> {
+) -> Result<ListResult>
+where
+    IO: IOLayer,
+{
     let Some(mut task) = NextTask::start(state, prefix).await? else {
         return Ok(ListResult {
             common_prefixes: vec![],
@@ -136,10 +142,13 @@ enum DirFd {
     },
 }
 
-enum NextTask {
+enum NextTask<IO>
+where
+    IO: IOLayer,
+{
     OpenDir {
         dir_fds: Vec<DirFd>,
-        state: Arc<State>,
+        state: Arc<State<IO>>,
         getdents_buffer: Vec<MaybeUninit<u8>>,
     },
     ReadNextEntry {
@@ -147,12 +156,15 @@ enum NextTask {
         dir_fd: Arc<dyn IOFD>,
         getdents_buffer: Vec<MaybeUninit<u8>>,
         prefix: Option<Path>,
-        state: Arc<State>,
+        state: Arc<State<IO>>,
     },
 }
 
-impl NextTask {
-    async fn start(state: Arc<State>, prefix: Option<Path>) -> Result<Option<Self>> {
+impl<IO> NextTask<IO>
+where
+    IO: IOLayer,
+{
+    async fn start(state: Arc<State<IO>>, prefix: Option<Path>) -> Result<Option<Self>> {
         let state2 = Arc::clone(&state);
         let (dir_fd_res, prefix) = spawn_io(&state.options().io_layer, move |io| {
             let dir_fd_res = match &prefix {

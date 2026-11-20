@@ -13,7 +13,7 @@ use crate::{
         RESOLVE_FLAGS, STAGING_FILE_PREFIX, STORE_NAME,
     },
     error::IOErrorExt,
-    io::{IOBlock, IOFD},
+    io::{IOBlock, IOFD, IOLayer},
     state::State,
 };
 
@@ -215,12 +215,15 @@ pub(crate) struct TransferFDs<'a> {
     pub(crate) to_file: &'a str,
 }
 
-pub(crate) fn prepare_transfer_dirs<'a>(
+pub(crate) fn prepare_transfer_dirs<'a, IO>(
     io: &mut dyn IOBlock,
     from: &'a Path,
     to: &'a Path,
-    state: &State,
-) -> Result<TransferFDs<'a>, Error> {
+    state: &State<IO>,
+) -> Result<TransferFDs<'a>, Error>
+where
+    IO: IOLayer,
+{
     let (from_dirs_str, from_file) = split_dirs_and_filename_str(from);
     let (to_dirs_str, to_file) = split_dirs_and_filename_str(to);
 

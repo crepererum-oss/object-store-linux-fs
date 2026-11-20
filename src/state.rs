@@ -11,19 +11,25 @@ use crate::{
     LinuxFSOptions,
     constants::{MODE_DIR_CREATE, OFLAGS_DIR},
     error::IOErrorExt,
-    io::{IOBlock, IOFD, IOMutex, spawn_io},
+    io::{IOBlock, IOFD, IOLayer, IOMutex, spawn_io},
     utils::{OpenDirMode, open_dir_fd},
 };
 
 #[derive(Debug)]
-pub(crate) struct State {
+pub(crate) struct State<IO>
+where
+    IO: IOLayer,
+{
     root: PathBuf,
     dir_fd_cache: IOMutex<HashMap<PathBuf, Arc<dyn IOFD>>>,
-    options: LinuxFSOptions,
+    options: LinuxFSOptions<IO>,
 }
 
-impl State {
-    pub(crate) async fn new(root: PathBuf, options: LinuxFSOptions) -> Result<Self> {
+impl<IO> State<IO>
+where
+    IO: IOLayer,
+{
+    pub(crate) async fn new(root: PathBuf, options: LinuxFSOptions<IO>) -> Result<Self> {
         let (root, root_fd) = spawn_io(&options.io_layer, move |io| {
             let root_fd = io
                 .open(&root, OFLAGS_DIR, Mode::empty())
@@ -94,7 +100,7 @@ impl State {
         &self.root
     }
 
-    pub(crate) fn options(&self) -> &LinuxFSOptions {
+    pub(crate) fn options(&self) -> &LinuxFSOptions<IO> {
         &self.options
     }
 }

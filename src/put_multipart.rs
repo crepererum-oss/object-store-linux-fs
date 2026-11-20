@@ -34,7 +34,7 @@ impl UploadParts {
         for part in &self.parts {
             match part {
                 PartState::Running => {
-                    return Err(LinuxFSUpload::err_still_running());
+                    return Err(err_still_running());
                 }
                 PartState::Failed => {
                     any_failed = true;
@@ -54,62 +54,53 @@ enum PartState {
 }
 
 #[derive(Debug)]
-pub(crate) struct LinuxFSUpload {
+pub(crate) struct LinuxFSUpload<IO>
+where
+    IO: IOLayer,
+{
     state: Arc<IORwLock<UploadState>>,
 
     // NOTE: this does NOT count as an I/O lock because we don't do I/O during it
     parts: Arc<Mutex<UploadParts>>,
 
-    io_layer: Arc<dyn IOLayer>,
+    io_layer: Arc<IO>,
 }
 
-impl LinuxFSUpload {
+impl<IO> LinuxFSUpload<IO>
+where
+    IO: IOLayer,
+{
     pub(crate) async fn new(
-        io_layer: Arc<dyn IOLayer>,
-        state: Arc<State>,
+        state: Arc<State<IO>>,
         location: Path,
         opts: PutOptions,
     ) -> Result<Self> {
-        let op = spawn_io(&io_layer, move |io| {
-            let op = PreparedPutOperation::new(io, location, opts, &state)?;
+        let state2 = Arc::clone(&state);
+        let op = spawn_io(&state.options().io_layer, move |io| {
+            let op = PreparedPutOperation::new(io, location, opts, &state2)?;
             op.blocking_io_start(io)
         })
         .await?;
 
         Ok(Self {
-            state: Arc::new(IORwLock::new(&io_layer, UploadState::Running { op })),
+            state: Arc::new(IORwLock::new(
+                &state.options().io_layer,
+                UploadState::Running { op },
+            )),
             parts: Arc::new(Mutex::new(UploadParts {
                 parts: Default::default(),
                 offset: 0,
             })),
-            io_layer,
+            io_layer: Arc::clone(&state.options().io_layer),
         })
-    }
-
-    fn err_still_running() -> Error {
-        Error::Generic {
-            store: STORE_NAME,
-            source: "upload is still running".to_owned().into(),
-        }
-    }
-
-    fn err_not_running() -> Error {
-        Error::Generic {
-            store: STORE_NAME,
-            source: "upload no longer running".to_owned().into(),
-        }
-    }
-
-    fn err_failed() -> Error {
-        Error::Generic {
-            store: STORE_NAME,
-            source: "an upload part failed".to_owned().into(),
-        }
     }
 }
 
 #[async_trait]
-impl MultipartUpload for LinuxFSUpload {
+impl<IO> MultipartUpload for LinuxFSUpload<IO>
+where
+    IO: IOLayer,
+{
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let state = Arc::clone(&self.state);
         let parts = Arc::clone(&self.parts);
@@ -136,7 +127,7 @@ impl MultipartUpload for LinuxFSUpload {
                 let op = match state.deref() {
                     UploadState::Running { op } => op,
                     UploadState::Finished { broken: _ } => {
-                        return Err(Self::err_not_running());
+                        return Err(err_not_running());
                     }
                 };
 
@@ -177,12 +168,12 @@ impl MultipartUpload for LinuxFSUpload {
                 UploadState::Running { op } => {
                     if any_failed {
                         drop(op);
-                        Err(Self::err_failed())
+                        Err(err_failed())
                     } else {
                         op.blocking_io_commit(io)
                     }
                 }
-                UploadState::Finished { .. } => Err(Self::err_not_running()),
+                UploadState::Finished { .. } => Err(err_not_running()),
             };
 
             *state = UploadState::Finished {
@@ -230,7 +221,7 @@ impl MultipartUpload for LinuxFSUpload {
                         // allow "abort after fail"
                         Ok(true)
                     } else {
-                        Err(Self::err_not_running())
+                        Err(err_not_running())
                     }
                 }
             };
@@ -246,5 +237,26 @@ impl MultipartUpload for LinuxFSUpload {
             res.map(|_| ())
         })
         .await
+    }
+}
+
+fn err_still_running() -> Error {
+    Error::Generic {
+        store: STORE_NAME,
+        source: "upload is still running".to_owned().into(),
+    }
+}
+
+fn err_not_running() -> Error {
+    Error::Generic {
+        store: STORE_NAME,
+        source: "upload no longer running".to_owned().into(),
+    }
+}
+
+fn err_failed() -> Error {
+    Error::Generic {
+        store: STORE_NAME,
+        source: "an upload part failed".to_owned().into(),
     }
 }

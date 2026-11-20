@@ -27,7 +27,7 @@ pub use raw::RawIOLayer;
 
 pub type DefaultIOLayer = RawIOLayer;
 
-pub trait IOLayer: Debug + Send + Sync {
+pub trait IOLayer: Debug + Send + Sync + 'static {
     fn prepare_block(&self) -> Box<dyn IOBlockPrepared>;
     fn create_raw_mutex(&self) -> Box<dyn IORawMutex>;
     fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock>;
