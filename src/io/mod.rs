@@ -1,10 +1,7 @@
 use std::{
-    any::Any,
-    cell::UnsafeCell,
     fmt::Debug,
     io::{IoSlice, IoSliceMut},
-    marker::PhantomData,
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::MaybeUninit,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -34,12 +31,17 @@ pub trait IOLayer: Debug + Send + Sync + 'static {
     type Mutex<T>: IOMutex<T, Block = Self::Block>
     where
         T: Send + Debug;
+    type RwLock<T>: IORwLock<T, Block = Self::Block>
+    where
+        T: Send + Sync + Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared;
     fn create_mutex<T>(&self, data: T) -> Self::Mutex<T>
     where
         T: Send + Debug;
-    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock>;
+    fn create_rwlock<T>(&self, data: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + Debug;
 }
 
 pub trait IOBlockPrepared: Send {
@@ -96,12 +98,6 @@ pub trait IOBlock {
         fd: &Self::FD,
         buf: &mut Vec<MaybeUninit<u8>>,
     ) -> Result<Vec<(String, FileType)>, Errno>;
-
-    /// Write-lock the given rw lock.
-    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard>;
-
-    /// Read-lock the given rw lock.
-    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard>;
 
     /// See <https://man.archlinux.org/man/linkat.2>.
     fn linkat(
@@ -172,18 +168,6 @@ pub trait IOBlock {
     fn uuid(&mut self) -> Uuid;
 }
 
-pub trait IORawMutexGuard: Any {}
-
-pub trait IORawRwLock: Any + Send + Sync {
-    /// # Safety
-    /// See [`lock_api::RawRwLock::unlock_shared`].
-    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>);
-
-    /// # Safety
-    /// See [`lock_api::RawRwLock::unlock_exclusive`].
-    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>);
-}
-
 pub trait IOFD: Debug + Send + Sync {}
 
 impl<T> IOLayer for Arc<T>
@@ -197,6 +181,10 @@ where
         = T::Mutex<T2>
     where
         T2: Send + Debug;
+    type RwLock<T2>
+        = T::RwLock<T2>
+    where
+        T2: Send + Sync + Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         self.as_ref().prepare_block()
@@ -209,8 +197,11 @@ where
         self.as_ref().create_mutex(data)
     }
 
-    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
-        self.as_ref().create_raw_rwlock()
+    fn create_rwlock<T2>(&self, data: T2) -> Self::RwLock<T2>
+    where
+        T2: Send + Sync + Debug,
+    {
+        self.as_ref().create_rwlock(data)
     }
 }
 
@@ -253,117 +244,25 @@ where
 
 pub trait IOMutexGuard<'a, T>: Deref<Target = T> + DerefMut<Target = T> {}
 
-pub(crate) struct IORwLock<T> {
-    data: UnsafeCell<T>,
-    raw: Box<dyn IORawRwLock>,
-}
-
-impl<T> IORwLock<T> {
-    pub(crate) fn new<IO>(io: &IO, data: T) -> Self
+pub trait IORwLock<T>: Send + Sync + Debug
+where
+    T: Send + Sync + Debug,
+{
+    type Block: IOBlock;
+    type ReadGuard<'a>: IORwLockReadGuard<'a, T>
     where
-        IO: IOLayer,
-    {
-        Self {
-            data: UnsafeCell::new(data),
-            raw: io.create_raw_rwlock(),
-        }
-    }
-
-    pub(crate) fn read<B>(&self, io: &mut B) -> IORwLockReadGuard<'_, T>
+        Self: 'a;
+    type WriteGuard<'a>: IORwLockWriteGuard<'a, T>
     where
-        B: IOBlock,
-    {
-        let guard = io.lock_shared(self.raw.as_ref());
+        Self: 'a;
 
-        IORwLockReadGuard {
-            mutex: self,
-            marker: PhantomData,
-            guard: ManuallyDrop::new(guard),
-        }
-    }
-
-    pub(crate) fn write<B>(&self, io: &mut B) -> IORwLockWriteGuard<'_, T>
-    where
-        B: IOBlock,
-    {
-        let guard = io.lock_exclusive(self.raw.as_ref());
-
-        IORwLockWriteGuard {
-            mutex: self,
-            marker: PhantomData,
-            guard: ManuallyDrop::new(guard),
-        }
-    }
+    fn read<'a>(&'a self, io: &mut Self::Block) -> Self::ReadGuard<'a>;
+    fn write<'a>(&'a self, io: &mut Self::Block) -> Self::WriteGuard<'a>;
 }
 
-unsafe impl<T: Send> Sync for IORwLock<T> {}
+pub trait IORwLockReadGuard<'a, T>: Deref<Target = T> {}
 
-impl<T> std::fmt::Debug for IORwLock<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IORwLock").finish_non_exhaustive()
-    }
-}
-
-pub(crate) struct IORwLockReadGuard<'a, T> {
-    mutex: &'a IORwLock<T>,
-    marker: PhantomData<&'a T>,
-    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
-}
-
-impl<'a, T: 'a> Drop for IORwLockReadGuard<'a, T> {
-    #[inline]
-    fn drop(&mut self) {
-        // Safety: A ReadGuard always holds the lock.
-        unsafe {
-            self.mutex
-                .raw
-                .unlock_shared(ManuallyDrop::take(&mut self.guard));
-        }
-    }
-}
-
-impl<'a, T: 'a> Deref for IORwLockReadGuard<'a, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        unsafe { self.mutex.data.get().as_ref_unchecked() }
-    }
-}
-
-pub(crate) struct IORwLockWriteGuard<'a, T> {
-    mutex: &'a IORwLock<T>,
-    marker: PhantomData<&'a mut T>,
-    guard: ManuallyDrop<Box<dyn IORawMutexGuard>>,
-}
-
-impl<'a, T: 'a> Drop for IORwLockWriteGuard<'a, T> {
-    #[inline]
-    fn drop(&mut self) {
-        // Safety: A WriteGuard always holds the lock.
-        unsafe {
-            self.mutex
-                .raw
-                .unlock_exclusive(ManuallyDrop::take(&mut self.guard));
-        }
-    }
-}
-
-impl<'a, T: 'a> Deref for IORwLockWriteGuard<'a, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        unsafe { self.mutex.data.get().as_ref_unchecked() }
-    }
-}
-
-impl<'a, T: 'a> DerefMut for IORwLockWriteGuard<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.mutex.data.get().as_mut_unchecked() }
-    }
-}
+pub trait IORwLockWriteGuard<'a, T>: Deref<Target = T> + DerefMut<Target = T> {}
 
 #[cfg(test)]
 mod tests {

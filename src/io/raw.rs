@@ -1,11 +1,9 @@
 use std::{
-    any::Any,
     io::{IoSlice, IoSliceMut},
     mem::MaybeUninit,
     os::fd::OwnedFd,
 };
 
-use lock_api::{GuardNoSend, RawRwLock};
 use rustix::{
     fs::{
         AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat,
@@ -16,45 +14,12 @@ use rustix::{
 use uuid::Uuid;
 
 use crate::io::{
-    IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORawMutexGuard, IORawRwLock,
+    IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORwLock, IORwLockReadGuard,
+    IORwLockWriteGuard,
 };
 
 #[derive(Debug, Default)]
 pub struct RawIOLayer;
-
-struct ParkingLotIORawRwLock {
-    lock: parking_lot::RawRwLock,
-}
-
-impl IORawRwLock for ParkingLotIORawRwLock {
-    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>) {
-        let guard = *(guard as Box<dyn Any>)
-            .downcast::<ParkingLotIORawLockGuard>()
-            .expect("wrong type");
-
-        // SAFETY: caller
-        unsafe {
-            self.lock.unlock_shared(guard.guard);
-        }
-    }
-
-    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>) {
-        let guard = *(guard as Box<dyn Any>)
-            .downcast::<ParkingLotIORawLockGuard>()
-            .expect("wrong type");
-
-        // SAFETY: caller
-        unsafe {
-            self.lock.unlock_exclusive(guard.guard);
-        }
-    }
-}
-
-struct ParkingLotIORawLockGuard {
-    guard: GuardNoSend,
-}
-
-impl IORawMutexGuard for ParkingLotIORawLockGuard {}
 
 #[derive(Debug)]
 pub struct RawIOFD {
@@ -71,6 +36,10 @@ impl IOLayer for RawIOLayer {
         = parking_lot::Mutex<T>
     where
         T: Send + std::fmt::Debug;
+    type RwLock<T>
+        = parking_lot::RwLock<T>
+    where
+        T: Send + Sync + std::fmt::Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         RawIOBlockPrepared { _priv: () }
@@ -83,10 +52,11 @@ impl IOLayer for RawIOLayer {
         parking_lot::Mutex::new(data)
     }
 
-    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
-        Box::new(ParkingLotIORawRwLock {
-            lock: parking_lot::RawRwLock::INIT,
-        })
+    fn create_rwlock<T>(&self, data: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + std::fmt::Debug,
+    {
+        parking_lot::RwLock::new(data)
     }
 }
 
@@ -211,24 +181,6 @@ impl IOBlock for RawIOBlock {
         Ok(entries)
     }
 
-    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
-        let guard = (raw_lock as &dyn Any)
-            .downcast_ref::<ParkingLotIORawRwLock>()
-            .expect("wrong type")
-            .lock
-            .lock_exclusive();
-        Box::new(ParkingLotIORawLockGuard { guard })
-    }
-
-    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
-        let guard = (raw_lock as &dyn Any)
-            .downcast_ref::<ParkingLotIORawRwLock>()
-            .expect("wrong type")
-            .lock
-            .lock_shared();
-        Box::new(ParkingLotIORawLockGuard { guard })
-    }
-
     fn linkat(
         &mut self,
         old_dirfd: &Self::FD,
@@ -339,3 +291,31 @@ where
 }
 
 impl<'a, T> IOMutexGuard<'a, T> for parking_lot::MutexGuard<'a, T> {}
+
+impl<T> IORwLock<T> for parking_lot::RwLock<T>
+where
+    T: Send + Sync + std::fmt::Debug,
+{
+    type Block = RawIOBlock;
+
+    type ReadGuard<'a>
+        = parking_lot::RwLockReadGuard<'a, T>
+    where
+        Self: 'a;
+    type WriteGuard<'a>
+        = parking_lot::RwLockWriteGuard<'a, T>
+    where
+        Self: 'a;
+
+    fn read<'a>(&'a self, _io: &mut Self::Block) -> Self::ReadGuard<'a> {
+        self.read()
+    }
+
+    fn write<'a>(&'a self, _io: &mut Self::Block) -> Self::WriteGuard<'a> {
+        self.write()
+    }
+}
+
+impl<'a, T> IORwLockReadGuard<'a, T> for parking_lot::RwLockReadGuard<'a, T> {}
+
+impl<'a, T> IORwLockWriteGuard<'a, T> for parking_lot::RwLockWriteGuard<'a, T> {}

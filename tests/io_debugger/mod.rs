@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     cell::{Cell, RefCell},
     fmt::Write,
     marker::PhantomData,
@@ -10,8 +9,8 @@ use std::{
 
 use indexmap::IndexMap;
 use object_store_linux_fs::io::{
-    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard,
-    IORawMutexGuard, IORawRwLock,
+    DefaultIOLayer, IOBlock, IOBlockPrepared, IOFD, IOLayer, IOMutex, IOMutexGuard, IORwLock,
+    IORwLockReadGuard, IORwLockWriteGuard,
 };
 use parking_lot::ReentrantMutex;
 use rustix::io::Errno;
@@ -115,6 +114,10 @@ where
         = DebugIOMutex<T, IO::Mutex<T>>
     where
         T: Send + std::fmt::Debug;
+    type RwLock<T>
+        = DebugIORwLock<T, IO::RwLock<T>>
+    where
+        T: Send + Sync + std::fmt::Debug;
 
     fn prepare_block(&self) -> Self::BlockPrepared {
         let guard = self.state.lock();
@@ -164,7 +167,10 @@ where
         }
     }
 
-    fn create_raw_rwlock(&self) -> Box<dyn IORawRwLock> {
+    fn create_rwlock<T>(&self, data: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + std::fmt::Debug,
+    {
         let state = Arc::clone(&self.state);
         let guard = self.state.lock();
         let mut guard = guard.borrow_mut();
@@ -183,11 +189,12 @@ where
             res: Ok(Value::ID("rwlock", id)),
         });
 
-        Box::new(DebugIORawRwLock {
+        DebugIORwLock {
             id,
-            inner: self.inner.create_raw_rwlock(),
+            inner: ManuallyDrop::new(self.inner.create_rwlock(data)),
             state,
-        })
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -473,64 +480,6 @@ where
             map_ok: |_| Value::Ellipsis,
             phantom: PhantomData,
         })
-    }
-
-    fn lock_exclusive(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
-        let lock = (raw_lock as &dyn Any)
-            .downcast_ref::<DebugIORawRwLock>()
-            .expect("wrong type");
-
-        self.event(Event {
-            fun: "lock_exlusive",
-            args: IndexMap::from([("rwlock", Value::ID("rwlock", lock.id))]),
-            state: |state| {
-                let id = state.guard_counter;
-                state.guard_counter += 1;
-                id
-            },
-            f: |inner, id| {
-                let inner = inner.lock_exclusive(lock.inner.as_ref());
-                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
-            },
-            map_ok: |guard| {
-                let id = (guard.as_ref() as &dyn Any)
-                    .downcast_ref::<DebugIORawMutexGuard>()
-                    .expect("just created that type")
-                    .id;
-                Value::ID("guard", id)
-            },
-            phantom: PhantomData,
-        })
-        .expect("never fails")
-    }
-
-    fn lock_shared(&mut self, raw_lock: &dyn IORawRwLock) -> Box<dyn IORawMutexGuard> {
-        let lock = (raw_lock as &dyn Any)
-            .downcast_ref::<DebugIORawRwLock>()
-            .expect("wrong type");
-
-        self.event(Event {
-            fun: "lock_shared",
-            args: IndexMap::from([("rwlock", Value::ID("rwlock", lock.id))]),
-            state: |state| {
-                let id = state.guard_counter;
-                state.guard_counter += 1;
-                id
-            },
-            f: |inner, id| {
-                let inner = inner.lock_shared(lock.inner.as_ref());
-                Ok(Box::new(DebugIORawMutexGuard { id, inner }))
-            },
-            map_ok: |guard| {
-                let id = (guard.as_ref() as &dyn Any)
-                    .downcast_ref::<DebugIORawMutexGuard>()
-                    .expect("just created that type")
-                    .id;
-                Value::ID("guard", id)
-            },
-            phantom: PhantomData,
-        })
-        .expect("never fails")
     }
 
     fn linkat(
@@ -954,21 +903,40 @@ where
 
 impl<'a, T, G> IOMutexGuard<'a, T> for DebugIOMutexGuard<'a, T, G> where G: IOMutexGuard<'a, T> {}
 
-struct DebugIORawRwLock {
+#[derive(Debug)]
+pub struct DebugIORwLock<T, L>
+where
+    L: IORwLock<T>,
+    T: Send + Sync + std::fmt::Debug,
+{
     id: u64,
-    inner: Box<dyn IORawRwLock>,
+    inner: ManuallyDrop<L>,
     state: SharedState,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl Drop for DebugIORawRwLock {
+impl<T, L> Drop for DebugIORwLock<T, L>
+where
+    L: IORwLock<T>,
+    T: Send + Sync + std::fmt::Debug,
+{
     fn drop(&mut self) {
         let guard = self.state.lock();
-        let mut guard = guard.borrow_mut();
+
+        // drop inner
+        //
+        // SAFETY: we run in destructor
+        unsafe {
+            ManuallyDrop::drop(&mut self.inner);
+        }
+
+        // get mut ref AFTER inner drop
+        let mut guard_mut = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get().or_else(|| ASYNC_TASK_ID.try_get().ok());
         let block_id = SYNC_BLOCK_ID.get();
 
-        guard.log.push(LogEntry {
+        guard_mut.log.push(LogEntry {
             task_id,
             block_id,
             fun: "destroy_rwlock",
@@ -978,70 +946,206 @@ impl Drop for DebugIORawRwLock {
     }
 }
 
-impl IORawRwLock for DebugIORawRwLock {
-    unsafe fn unlock_shared(&self, guard: Box<dyn IORawMutexGuard>) {
-        let dbg_guard = (guard as Box<dyn Any>)
-            .downcast::<DebugIORawMutexGuard>()
-            .expect("wrong type");
+impl<T, L> IORwLock<T> for DebugIORwLock<T, L>
+where
+    L: IORwLock<T>,
+    T: Send + Sync + std::fmt::Debug,
+{
+    type Block = DebugIOBlock<L::Block>;
 
-        let guard2 = self.state.lock();
-        let mut guard2 = guard2.borrow_mut();
+    type ReadGuard<'a>
+        = DebugIORwLockReadGuard<'a, T, L::ReadGuard<'a>>
+    where
+        Self: 'a;
 
-        // SAFETY: caller
+    type WriteGuard<'a>
+        = DebugIORwLockWriteGuard<'a, T, L::WriteGuard<'a>>
+    where
+        Self: 'a;
+
+    fn read<'a>(&'a self, io: &mut Self::Block) -> Self::ReadGuard<'a> {
+        let state = Arc::clone(&io.state);
+
+        io.event(Event {
+            fun: "lock_shared",
+            args: IndexMap::from([("rwlock", Value::ID("rwlock", self.id))]),
+            state: |state| {
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                id
+            },
+            f: |inner, guard_id| {
+                let inner = self.inner.read(inner);
+                Ok(DebugIORwLockReadGuard {
+                    guard_id,
+                    rwlock_id: self.id,
+                    inner: ManuallyDrop::new(inner),
+                    state,
+                    phantom: PhantomData,
+                })
+            },
+            map_ok: |guard| Value::ID("guard", guard.guard_id),
+            phantom: PhantomData,
+        })
+        .expect("never fails")
+    }
+
+    fn write<'a>(&'a self, io: &mut Self::Block) -> Self::WriteGuard<'a> {
+        let state = Arc::clone(&io.state);
+
+        io.event(Event {
+            fun: "lock_exclusive",
+            args: IndexMap::from([("rwlock", Value::ID("rwlock", self.id))]),
+            state: |state| {
+                let id = state.guard_counter;
+                state.guard_counter += 1;
+                id
+            },
+            f: |inner, guard_id| {
+                let inner = self.inner.write(inner);
+                Ok(DebugIORwLockWriteGuard {
+                    guard_id,
+                    rwlock_id: self.id,
+                    inner: ManuallyDrop::new(inner),
+                    state,
+                    phantom: PhantomData,
+                })
+            },
+            map_ok: |guard| Value::ID("guard", guard.guard_id),
+            phantom: PhantomData,
+        })
+        .expect("never fails")
+    }
+}
+
+pub struct DebugIORwLockReadGuard<'a, T, G>
+where
+    G: IORwLockReadGuard<'a, T>,
+{
+    rwlock_id: u64,
+    guard_id: u64,
+    inner: ManuallyDrop<G>,
+    state: SharedState,
+    phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T, G> Drop for DebugIORwLockReadGuard<'a, T, G>
+where
+    G: IORwLockReadGuard<'a, T>,
+{
+    fn drop(&mut self) {
+        let guard = self.state.lock();
+
+        // drop inner
+        //
+        // SAFETY: we run in destructor
         unsafe {
-            self.inner.unlock_shared(dbg_guard.inner);
+            ManuallyDrop::drop(&mut self.inner);
         }
+
+        // get mut ref AFTER inner drop
+        let mut guard_mut = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get();
         let block_id = SYNC_BLOCK_ID.get();
 
-        guard2.log.push(LogEntry {
+        guard_mut.log.push(LogEntry {
             task_id,
             block_id,
             fun: "unlock_shared",
             args: IndexMap::from([
-                ("rwlock", Value::ID("rwlock", self.id)),
-                ("guard", Value::ID("guard", dbg_guard.id)),
+                ("rwlock", Value::ID("rwlock", self.rwlock_id)),
+                ("guard", Value::ID("guard", self.guard_id)),
             ]),
             res: Ok(Value::Unit),
         });
     }
+}
 
-    unsafe fn unlock_exclusive(&self, guard: Box<dyn IORawMutexGuard>) {
-        let dbg_guard = (guard as Box<dyn Any>)
-            .downcast::<DebugIORawMutexGuard>()
-            .expect("wrong type");
+impl<'a, T, G> Deref for DebugIORwLockReadGuard<'a, T, G>
+where
+    G: IORwLockReadGuard<'a, T>,
+{
+    type Target = T;
 
-        let guard2 = self.state.lock();
-        let mut guard2 = guard2.borrow_mut();
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
 
-        // SAFETY: caller
+impl<'a, T, G> IORwLockReadGuard<'a, T> for DebugIORwLockReadGuard<'a, T, G> where
+    G: IORwLockReadGuard<'a, T>
+{
+}
+
+pub struct DebugIORwLockWriteGuard<'a, T, G>
+where
+    G: IORwLockWriteGuard<'a, T>,
+{
+    rwlock_id: u64,
+    guard_id: u64,
+    inner: ManuallyDrop<G>,
+    state: SharedState,
+    phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T, G> Drop for DebugIORwLockWriteGuard<'a, T, G>
+where
+    G: IORwLockWriteGuard<'a, T>,
+{
+    fn drop(&mut self) {
+        let guard = self.state.lock();
+
+        // drop inner
+        //
+        // SAFETY: we run in destructor
         unsafe {
-            self.inner.unlock_exclusive(dbg_guard.inner);
+            ManuallyDrop::drop(&mut self.inner);
         }
+
+        // get mut ref AFTER inner drop
+        let mut guard_mut = guard.borrow_mut();
 
         let task_id = SYNC_TASK_ID.get();
         let block_id = SYNC_BLOCK_ID.get();
 
-        guard2.log.push(LogEntry {
+        guard_mut.log.push(LogEntry {
             task_id,
             block_id,
             fun: "unlock_exclusive",
             args: IndexMap::from([
-                ("rwlock", Value::ID("rwlock", self.id)),
-                ("guard", Value::ID("guard", dbg_guard.id)),
+                ("rwlock", Value::ID("rwlock", self.rwlock_id)),
+                ("guard", Value::ID("guard", self.guard_id)),
             ]),
             res: Ok(Value::Unit),
         });
     }
 }
 
-struct DebugIORawMutexGuard {
-    id: u64,
-    inner: Box<dyn IORawMutexGuard>,
+impl<'a, T, G> Deref for DebugIORwLockWriteGuard<'a, T, G>
+where
+    G: IORwLockWriteGuard<'a, T>,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
 }
 
-impl IORawMutexGuard for DebugIORawMutexGuard {}
+impl<'a, T, G> DerefMut for DebugIORwLockWriteGuard<'a, T, G>
+where
+    G: IORwLockWriteGuard<'a, T>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.deref_mut()
+    }
+}
+
+impl<'a, T, G> IORwLockWriteGuard<'a, T> for DebugIORwLockWriteGuard<'a, T, G> where
+    G: IORwLockWriteGuard<'a, T>
+{
+}
 
 #[derive(Debug)]
 pub struct DebugIOFD<FD>

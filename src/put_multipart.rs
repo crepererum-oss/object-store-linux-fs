@@ -61,7 +61,7 @@ pub(crate) struct LinuxFSUpload<IO>
 where
     IO: IOLayer,
 {
-    state: Arc<IORwLock<UploadState<IO::FD>>>,
+    state: Arc<IO::RwLock<UploadState<IO::FD>>>,
 
     // NOTE: this does NOT count as an I/O lock because we don't do I/O during it
     parts: Arc<Mutex<UploadParts>>,
@@ -86,10 +86,12 @@ where
         .await?;
 
         Ok(Self {
-            state: Arc::new(IORwLock::new(
-                &state.options().io_layer,
-                UploadState::Running { op },
-            )),
+            state: Arc::new(
+                state
+                    .options()
+                    .io_layer
+                    .create_rwlock(UploadState::Running { op }),
+            ),
             parts: Arc::new(Mutex::new(UploadParts {
                 parts: Default::default(),
                 offset: 0,
